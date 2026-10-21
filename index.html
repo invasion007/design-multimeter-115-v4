@@ -369,6 +369,13 @@ return DF / (fp * (1 - fp));
 }
 var OHM_SEVEN = [1.0, 0.9, 0.75, 0.5, 0.25, 0.1, 0.02];
 
+function mechOffset(screw) { return clamp(screw, -1, 1) * 0.06; }
+function mechRead(Rx, mult, zero, screw) {
+var R = ohmRint(mult), z = (zero == null ? 1 : zero);
+var f = clamp(z * R / (R + Math.max(0, Rx)) + mechOffset(screw), 1e-4, 1.02);
+return ohmScaleMid(mult) * (1 - f) / f * mult;
+}
+
 var WIRE_MAP = {
 V: [
 { fig: 'A(公共端) → 表头 G', phys: '⑥红笔插孔 → ①表头 + 端子', label: 'A' },
@@ -438,6 +445,35 @@ var POS6 = [
 { pos: 5, lab: '直流电压 3 V', part: '分压', kind: 'V' },
 { pos: 6, lab: '直流电压 10 V', part: '分压', kind: 'V' }
 ];
+
+function branchOf(pos) {
+var b = {
+0: { pos: 0, kind: 'off', label: 'OFF / 交流电压最高挡', short: 'OFF', note: '断开，表头不与任何外围接通' },
+1: { pos: 1, kind: 'A', label: '直流电流 10 mA', short: '10 mA', range: 0.01, Rs: shuntR(0.01), useShunt: true, path: 'A → 表头 G ∥ R分流 → 开关① → B' },
+2: { pos: 2, kind: 'A', label: '直流电流 100 mA', short: '100 mA', range: 0.1, Rs: shuntR(0.1), useShunt: true, path: 'A → 表头 G ∥ R分流 → 开关② → B' },
+3: { pos: 3, kind: 'ohm', label: '欧姆 ×100（×1/×10/×100 共用）', short: '×100', E: ohmE(100), R0: ohmR0(100), Rint: ohmRint(100), path: '电池 E → 黑笔 → R\u2093 → 红笔 → 表头 G → 调零 R₀ → 电池 −' },
+4: { pos: 4, kind: 'ohm', label: '欧姆 ×1k', short: '×1k', E: ohmE(1000), R0: ohmR0(1000), Rint: ohmRint(1000), path: '电池 E2 → 黑笔 → R\u2093 → 红笔 → 表头 G → 调零 R₀ → 电池 −' },
+5: { pos: 5, kind: 'V', label: '直流电压 3 V', short: '3 V', U: 3, R串: seriesR(3), path: 'A → 表头 G → R串 → 开关⑤ → B（并联在被测两点）' },
+6: { pos: 6, kind: 'V', label: '直流电压 10 V', short: '10 V', U: 10, R串: seriesR(10), path: 'A → 表头 G → R串 → 开关⑥ → B（并联在被测两点）' }
+};
+return b[pos] || b[0];
+}
+
+function isActive(pos, el) {
+var k = branchOf(pos).kind;
+if (k === 'off') { return false; }
+if (el === 'G') { return true; }
+if (el === 'Rs1') { return k === 'A' && pos === 2; }
+if (el === 'Rs2') { return k === 'A' && pos === 1; }
+if (el === 'V串') { return k === 'V'; }
+if (el === 'E1') { return k === 'ohm' && pos === 3; }
+if (el === 'E2') { return k === 'ohm' && pos === 4; }
+if (el === 'R0') { return k === 'ohm'; }
+if (el === 'Rx') { return k === 'ohm'; }
+if (el === 'B') { return true; }
+if (el === 'Rbe') { return true; }
+return false;
+}
 var SIX_STEPS = [
 { id: 'screw', title: '机械调零', note: '未通电时指针应指左端零位（欧姆刻度上的 ∞ 处）；不指就旋指针定位螺丝', rule: 'f === 0' },
 { id: 'range', title: '选挡选量程', note: '旋到对应功能区，量程略大于估计值；量程小于被测值会打表', rule: '量程 ≥ 被测值' },
@@ -573,6 +609,11 @@ chk('已调零 → 读数 = Rx（×100 挡）', near(ohmRead(1500, 100, 1).read,
 chk('×1k 使用 9 V 后中值 = 90 kΩ', near(ohmRxOfF(0.5, ohmRint(1000)), 90000, 1e-6) && near(ohmScaleMid(1000), 90, 1e-9));
 chk('×1/×10 借用分流电阻（表头等效 1 Ω / 10 Ω）', near(ohmHeadEff(1), 1, 1e-6) && near(ohmHeadEff(10), 10, 1e-6));
 
+chk('螺丝归零 → 零点偏移 0、读数不变', near(mechOffset(0), 0, 1e-12) && near(mechRead(1500, 100, 1, 0), 1500, 1e-6));
+chk('零点偏右 → 读数偏小；偏左 → 偏大', mechRead(1500, 100, 1, 1) < 1500 && mechRead(1500, 100, 1, -1) > 1500);
+chk('零点偏差 ±0.06 → 读数偏差 > 10%（是系统偏差不是随机误差）',
+(1 - mechRead(1500, 100, 1, 1) / 1500) > 0.1 && (mechRead(1500, 100, 1, -1) / 1500 - 1) > 0.1);
+
 chk('wireMap 三段各自唯一', (function () {
 var ks = ['V', 'A', 'ohm'], i, j, k;
 for (i = 0; i < ks.length; i++) {
@@ -597,6 +638,26 @@ chk('规范图含 A/B/C 标号', FIG_LABELS.join('') === 'ABC');
 chk('错误图至少触发 2 条规范', FIG_RULES.length >= 5);
 
 chk('六档位分区正确', POS6[0].part === '分流' && POS6[1].part === '分流' && POS6[2].part === '电池' && POS6[5].part === '分压');
+
+chk('每个档位都有唯一且标号自洽的支路', (function () {
+var ks = ['A', 'A', 'ohm', 'ohm', 'V', 'V'], i;
+for (i = 0; i < 6; i++) { var b = branchOf(i + 1); if (b.pos !== i + 1 || b.kind !== ks[i]) { return false; } }
+return branchOf(0).kind === 'off';
+})());
+chk('电流档分流电阻 = shuntR(该档量程)', near(branchOf(1).Rs, shuntR(0.01), 1e-9) && near(branchOf(2).Rs, shuntR(0.1), 1e-9));
+chk('电压档串阻 = seriesR(该档量程)', near(branchOf(5).R串, seriesR(3), 1e-9) && near(branchOf(6).R串, seriesR(10), 1e-9));
+chk('欧姆档电池/调零与四档表一致', branchOf(3).E === 1.5 && branchOf(4).E === 9 && near(branchOf(3).R0, 1400, 1e-9) && near(branchOf(4).R0, 89900, 1e-9));
+chk('高亮判定与档位一致（元件只在起作用的支路里亮）', (function () {
+
+if (isActive(2, 'Rs1') !== true || isActive(1, 'Rs1') !== false) { return false; }
+if (isActive(1, 'Rs2') !== true || isActive(2, 'Rs2') !== false) { return false; }
+if (isActive(5, 'V串') !== true || isActive(3, 'V串') !== false) { return false; }
+if (isActive(3, 'E1') !== true || isActive(4, 'E1') !== false) { return false; }
+if (isActive(4, 'E2') !== true || isActive(3, 'E2') !== false) { return false; }
+if (isActive(3, 'R0') !== true || isActive(5, 'R0') !== false) { return false; }
+if (isActive(0, 'G') !== false || isActive(1, 'G') !== true) { return false; }
+return true;
+})());
 chk('六步顺序固定', SIX_STEPS.length === 6 && SIX_STEPS[0].id === 'screw' && SIX_STEPS[5].id === 'reset');
 chk('七张规则卡关键词齐全', (function () {
 var txt = RULES.map(function (r) { return r.text; }).join(''); var i;
@@ -625,6 +686,7 @@ STD_V: STD_V, STD_A: STD_A, DIV_TABLE: DIV_TABLE, DIV_WHITE: DIV_WHITE,
 ROW_V: ROW_V, MULT: MULT, RINT: RINT, SCALE_MID: SCALE_MID,
 FIG_RULES: FIG_RULES, FIG_GEOM: FIG_GEOM, FIG_LABELS: FIG_LABELS,
 POS6: POS6, SIX_STEPS: SIX_STEPS, RULES: RULES, OHM_SEVEN: OHM_SEVEN,
+branchOf: branchOf, isActive: isActive,
 clamp: clamp, near: near, fmt: fmt, inList: inList,
 headState: headState, timesFull: timesFull,
 recommendRange: recommendRange, recommendReason: recommendReason,
@@ -637,6 +699,7 @@ polarity: polarity, reverseGuard: reverseGuard, circuitState: circuitState,
 probePotentials: probePotentials, diodeTest: diodeTest,
 ohmRint: ohmRint, ohmE: ohmE, ohmIfs: ohmIfs, ohmHeadEff: ohmHeadEff, ohmR0: ohmR0,
 ohmScaleMid: ohmScaleMid, ohmFrac: ohmFrac, ohmScale: ohmScale, ohmScaleOf: ohmScaleOf,
+mechOffset: mechOffset, mechRead: mechRead,
 ohmScaleGeom: ohmScaleGeom, ohmRead: ohmRead, ohmRxOfF: ohmRxOfF, ohmErr: ohmErr,
 wireMap: wireMap, checkWiring: checkWiring, segAngle: segAngle, figAnglesOK: figAnglesOK,
 twoRangeVolt: twoRangeVolt, twoRangeAmp: twoRangeAmp, selfTest: selfTest
@@ -993,7 +1056,7 @@ var narrow = W < 760;
 var R = Math.min(narrow ? W * 0.30 : W * 0.22, hh * 0.42);
 var cx = narrow ? W / 2 : W * 0.30, cy = t0 + hh * (narrow ? 0.32 : 0.58);
 dial(ctx, cx, cy, R, st, { rows: [{ type: 'uni', max: 1, div: 0.02, unit: 'mA', label: '0 – 1 mA' }], f: st.fShow, mark: true });
-if (!narrow) { txt(ctx, '表头 G（磁电式）', cx, cy + R * 1.25, { size: 12, align: 'center', weight: 700, color: C.ink2 }); }
+if (!narrow) { txt(ctx, '表头 G（磁电式）', cx, Math.min(cy + R * 1.25, b0 - 16), { size: 12, align: 'center', weight: 700, color: C.ink2 }); }
 var bx = narrow ? 20 : W * 0.52, bw = narrow ? W - 40 : W * 0.44;
 var by = narrow ? t0 + hh * 0.52 : t0 + 8;
 card(ctx, bx, by, bw, narrow ? hh * 0.44 : hh * 0.30, { title: '表头的三个参数（固定不变）' });
@@ -1179,7 +1242,7 @@ function vTaps(ctx, W, H, st) {
 var t0 = top(st), b0 = bot(H, st), hh = b0 - t0;
 var kind = st.tapKind === 'amp' ? 'amp' : 'volt';
 var x = 24, w = W - 48;
-var h1 = (hh - 40) / 2;
+var h1 = (hh - 152) / 2;
 var tabs = P.tapDelta([1, 3, 10]);
 
 card(ctx, x, t0 + 8, w, h1, { title: '电压挡：一串电阻，从不同位置抽头', tcolor: C.deep });
@@ -1213,17 +1276,35 @@ poly(ctx, [[L2 + 226, yy], [Rt2, yy], [Rt2, y2]], { color: onA ? C.orange : C.wi
 txt(ctx, names[i], Rt2 + 8, yy, { size: 11.5, weight: onA ? 700 : 500, color: onA ? C.orange : C.ink2 });
 }
 txt(ctx, '量程越大，分流电阻越小：' + shs[0].toFixed(4) + ' > ' + shs[1].toFixed(4) + ' > ' + shs[2].toFixed(4) + ' Ω', x + 16, y0b + h1 - 22, { size: 11.5, color: C.ink2 });
+
+var ty = y0b + h1 + 8;
+txt(ctx, '所以一只表要设计一整排档位（量程太小会打表、太大读不准）', x + 4, ty + 10, { size: 11.5, weight: 700, color: C.deep });
+var mA = [0.01, 0.1, 0.6, 3], mV = [1, 3, 10, 15];
+var r1 = [], r2 = [], i2;
+for (i2 = 0; i2 < 4; i2++) {
+r1.push((mA[i2] < 1 ? (mA[i2] * 1000).toFixed(0) + ' mA' : mA[i2] + ' A') + ' → ' + P.shuntR(mA[i2]).toFixed(4) + ' Ω');
+r2.push(mV[i2] + ' V → ' + P.seriesR(mV[i2]).toFixed(0) + ' Ω');
+}
+gridTable(ctx, x + 4, ty + 22, w - 8, [{ t: '电流挡 · 分流电阻', w: 1 }, { t: '10 mA', w: 1.3 }, { t: '100 mA', w: 1.3 }, { t: '0.6 A', w: 1.3 }, { t: '3 A', w: 1.3 }],
+[[r1[0].split(' → ')[1], r1[0].split(' → ')[1], r1[1].split(' → ')[1], r1[2].split(' → ')[1], r1[3].split(' → ')[1]]],
+{ rowH: 24, size: 10.5, hl: 0, hlColor: C.blue });
+var t2 = ty + 22 + 26 + 24 + 6;
+gridTable(ctx, x + 4, t2, w - 8, [{ t: '电压挡 · 串联电阻', w: 1 }, { t: '1 V', w: 1.3 }, { t: '3 V', w: 1.3 }, { t: '10 V', w: 1.3 }, { t: '15 V', w: 1.3 }],
+[[r2[0].split(' → ')[1], r2[0].split(' → ')[1], r2[1].split(' → ')[1], r2[2].split(' → ')[1], r2[3].split(' → ')[1]]],
+{ rowH: 24, size: 10.5, hl: 0, hlColor: C.orange });
 }
 
 function vDialBox(ctx, W, H, st) {
 var t0 = top(st), b0 = bot(H, st), hh = b0 - t0;
 var narrow = W < 760;
 var rows = st.rows || [];
-var R = Math.min(narrow ? W * 0.30 : W * 0.20, hh * 0.62);
-var cx = narrow ? W / 2 : W * 0.28, cy = t0 + hh * 0.62;
+
+var R = Math.min(narrow ? W * 0.40 : W * 0.30, hh * (narrow ? 0.52 : 0.62));
+var cx = narrow ? W / 2 : W * 0.335, cy = t0 + hh * (narrow ? 0.58 : 0.66);
+txt(ctx, '多用电表表盘（课本 11.5）', cx, t0 + 10, { size: narrow ? 10.5 : 12, align: 'center', weight: 700, color: C.deep });
 dial(ctx, cx, cy, R, st, { rows: rows, f: st.fShow, mark: true, hot: st.hotF });
 if (narrow) { return; }
-var bx = W * 0.54, bw = W - bx - 24;
+var bx = W * 0.66, bw = W - bx - 20;
 card(ctx, bx, t0 + 10, bw, hh * 0.44, { title: '这一刻的刻度', tcolor: C.deep });
 var lines = st.dialLines || [];
 for (var i = 0; i < lines.length && i < 6; i++) {
@@ -1363,8 +1444,8 @@ txt(ctx, 'G', (L + Rt) / 2, T - 24, { size: 10.5, align: 'center', color: C.ink3
 if (mode === 'ohm') {
 batt(ctx, L, midY, { label: 'E = 1.5 V', color: C.orange });
 rbox(ctx, (L + Rt) / 2 - 46, B - 16, 92, 32, 'R\u2093', '', { color: C.orange });
-txt(ctx, '黑笔', Rt - 6, midY - 22, { size: 11, weight: 700, color: C.ink, align: 'right' });
-txt(ctx, '红笔', L + 6, midY - 22, { size: 11, weight: 700, color: C.red });
+txt(ctx, '黑笔', Rt - 6, midY + 30, { size: 11, weight: 700, color: C.ink, align: 'right' });
+txt(ctx, '红笔', L + 6, midY + 30, { size: 11, weight: 700, color: C.red });
 } else {
 rbox(ctx, L + 40, T - 16, 80, 32, '被测', 'U', { color: C.blue, vcolor: C.blue });
 txt(ctx, '红笔（高电势）', L + 46, midY + 34, { size: 11, weight: 700, color: C.red, align: 'left' });
@@ -1561,7 +1642,7 @@ if (narrow) { txt(ctx, '（窄屏一次显示一张，点底栏切换）', W / 2
 function vCompose(ctx, W, H, st) {
 var t0 = top(st), b0 = bot(H, st), hh = b0 - t0;
 var narrow = W < 760;
-var cx = narrow ? W / 2 : W * 0.36, cy = t0 + hh * 0.46;
+var cx = narrow ? W / 2 : W * (st.showPos6 ? 0.28 : 0.36), cy = t0 + hh * 0.46;
 var R = Math.min(narrow ? W * 0.20 : W * 0.12, hh * 0.30);
 meterG(ctx, cx, cy, R, { label: 'G', size: R * 0.7, color: C.deep });
 txt(ctx, '表头 G', cx, cy + R + 20, { size: 11.5, align: 'center', weight: 700, color: C.ink2 });
@@ -1573,7 +1654,8 @@ var outs = [
 ];
 for (var i = 0; i < outs.length; i++) {
 var o = outs[i], on = o.pos.indexOf(st.pos) >= 0;
-var bw = narrow ? W * 0.30 : W * 0.30, bh = 52;
+var limit = st.showPos6 && !narrow ? W * 0.68 : W - 20;
+var bw = narrow ? W * 0.30 : Math.min(W * 0.30, Math.max(120, limit - o.x - 10)), bh = 52;
 rect(ctx, o.x, o.y, bw, bh, { fill: on ? C.note : C.card, stroke: on ? o.col : C.line, w: on ? 2 : 1.2, r: 10 });
 txt(ctx, o.lab, o.x + bw / 2, o.y + 19, { size: 11, align: 'center', weight: 700, color: on ? o.col : C.ink2 });
 txt(ctx, o.sub, o.x + bw / 2, o.y + 37, { size: 10, align: 'center', color: C.ink3 });
@@ -1677,7 +1759,7 @@ node(ctx, Rt, B + 30, 'C', { color: C.orange });
 meterG(ctx, (L + Rt) / 2 - 34, (T + B) / 2 + 16, 12, { size: 11 });
 rbox(ctx, (L + Rt) / 2 + 6, (T + B) / 2, 52, 26, 'R1', '', { lsize: 11 });
 arrow(ctx, L + 40, T - 14, L + 90, T - 14, { color: C.blue, w: 1.8, head: 7 });
-txt(ctx, '电流方向标的只标一次', L + 96, T - 14, { size: 10, color: C.blue });
+txt(ctx, '电流方向标的只标一次', L + 96, T - 26, { size: 10, color: C.blue });
 
 if (two) {
 var x2 = x + sw + 14;
@@ -1695,6 +1777,135 @@ txt(ctx, '✗ 斜线　✗ 交叉不画点　✗ 无 A/B/C　✗ 无方向　✗
 }
 }
 
+function vSchematic(ctx, W, H, st) {
+var t0 = top(st), b0 = bot(H, st);
+var narrow = W < 900;
+var pos = (st.pos == null) ? 5 : st.pos;
+var br = P.branchOf(pos);
+var on = br.kind !== 'off';
+var ON = C.orange, OFF = 'rgba(144,164,174,.5)';
+var cardW = narrow ? 0 : 86;
+var busX = narrow ? 34 : 26 + W * 0.235, retX = narrow ? W - 42 : W - 96 - cardW - 10;
+var yA = t0 + (narrow ? 34 : 44);
+txt(ctx, '多用电表内部原理图 · 旋转选择开关换档 → 只有一条支路导通', 14, t0 + 12, { size: narrow ? 10 : 11.5, color: C.ink3 });
+
+var bh = narrow ? 0 : 74, bw = narrow ? 0 : W * 0.20;
+var bx = narrow ? 0 : 22, by = t0 + 30;
+if (!narrow) {
+rect(ctx, bx, by, bw, bh, { fill: C.card, stroke: C.line2, w: 1.4, r: 8, alpha: .9 });
+txt(ctx, '表头网络', bx + 8, by + 13, { size: 9.5, color: C.ink3 });
+meterG(ctx, bx + 26, by + bh / 2 + 4, 15, { label: 'G' });
+txt(ctx, '1 mA / 100 Ω', bx + 46, by + bh - 12, { size: 9.5, color: C.ink3 });
+var a1 = P.isActive(pos, 'Rs1'), a2 = P.isActive(pos, 'Rs2');
+rbox(ctx, bx + 78, by + 16, bw - 88, 18, 'R分流 1.0101 Ω', '', { color: a1 ? ON : OFF, lsize: 8.6 });
+rbox(ctx, bx + 78, by + 40, bw - 88, 18, 'R分流 11.11 Ω', '', { color: a2 ? ON : OFF, lsize: 8.6 });
+poly(ctx, [[bx + 41, by + bh / 2 + 4], [bx + 78, by + bh / 2 + 4], [bx + 78, by + 25]], { color: C.wire, w: 1.6 });
+poly(ctx, [[bx + 41, by + bh / 2 + 4], [bx + 78, by + bh / 2 + 4], [bx + 78, by + 49]], { color: C.wire, w: 1.6 });
+txt(ctx, a1 || a2 ? '分流电阻：只在本档起作用' : '分流电阻：本档不起作用', bx + 8, by + bh + 12, { size: 9, color: (a1 || a2) ? ON : C.ink3 });
+}
+
+var topY = t0 + 30, botY = b0 - (narrow ? 26 : 54);
+line(ctx, busX, topY, busX, botY, { color: on ? C.wire : OFF, w: 2.2 });
+line(ctx, retX, topY, retX, botY, { color: on ? C.wire : OFF, w: 2.2 });
+dot(ctx, busX, yA, 4.6, { fill: on ? C.red : OFF });
+txt(ctx, 'A（红笔）', busX + (narrow ? 8 : 10), yA - 12, { size: narrow ? 9.5 : 11, weight: 700, color: on ? C.red : C.ink3 });
+dot(ctx, retX, botY, 4.6, { fill: on ? C.ink : OFF });
+txt(ctx, 'B（黑笔）', retX - 4, botY + 18, { size: narrow ? 9.5 : 11, weight: 700, align: 'right', color: on ? C.ink : C.ink3 });
+
+var n = 6, rowH = (botY - topY - 26) / n;
+var i, y, br2, act, k = 0;
+for (i = 0; i < n; i++) {
+y = topY + 16 + i * rowH;
+br2 = P.branchOf(i + 1); act = (pos === i + 1);
+poly(ctx, [[busX, y], [retX, y]], { color: act ? ON : OFF, w: act ? 3 : 1.4, dash: act ? null : [5, 4] });
+
+var mx = narrow ? busX + 34 : busX + 46, mw = retX - mx - (narrow ? 58 : 120);
+if (act && br2.kind === 'ohm') {
+batt(ctx, mx + 12, y, { label: 'E = ' + br2.E + ' V', color: ON, w: 20 });
+rbox(ctx, mx + 40, y - 9, mw * 0.42, 18, 'R₀ ' + (br2.R0 >= 1000 ? (br2.R0 / 1000) + ' k' : br2.R0) + ' Ω', '', { color: ON, lsize: 8.4 });
+} else if (act && br2.kind === 'V') {
+rbox(ctx, mx, y - 9, mw * 0.5, 18, 'R串 = ' + br2.R串 + ' Ω', '', { color: ON, lsize: 8.6 });
+} else if (act && br2.kind === 'A') {
+txt(ctx, '直通（表头 + 分流电阻已在左侧网络里）', mx, y, { size: 8.6, color: ON });
+} else if (br2.kind === 'ohm') {
+rbox(ctx, mx + 40, y - 9, mw * 0.42, 18, '电池 + R₀', '', { color: OFF, lsize: 8.4 });
+} else if (br2.kind === 'V') {
+rbox(ctx, mx, y - 9, mw * 0.5, 18, 'R串 ' + br2.R串 + ' Ω', '', { color: OFF, lsize: 8.6 });
+}
+var lab = (i + 1) + ' ' + br2.short;
+txt(ctx, lab, retX + 6, y, { size: narrow ? 8.5 : 10, weight: act ? 700 : 500, color: act ? ON : C.ink3 });
+if (act) { dot(ctx, busX, y, 4, { fill: ON }); dot(ctx, retX, y, 4, { fill: ON }); }
+}
+
+txt(ctx, 'OFF / 交流最高挡：开关断开（表头不与任何外围接通）', busX + 8, botY + (narrow ? 6 : 22), { size: narrow ? 9 : 10.5, color: pos === 0 ? C.blue : C.ink3, weight: pos === 0 ? 700 : 400 });
+
+if (on) {
+var py = topY + 16 + (pos - 1) * rowH;
+var path = [[busX, yA], [busX, py], [retX, py], [retX, botY]];
+particles(ctx, path, 14, st.phase || 0, { color: C.blue, speed: 0.16, r: 2.4 });
+} else {
+txt(ctx, '开关断开：全表无电流，指针不动', busX + 8, botY - 10, { size: 10, color: C.red, weight: 700 });
+}
+
+if (!narrow) {
+var ix = W - cardW - 10, iy = t0 + 30, iw = cardW, ih = Math.min(150, (botY - topY) * 0.5);
+rect(ctx, ix, iy, iw, ih, { fill: C.note, stroke: C.noteLine, w: 1, r: 8 });
+txt(ctx, '被测对象', ix + iw / 2, iy + 14, { size: 9, align: 'center', color: C.deep });
+var how = br.kind === 'V' ? '并联在被测两点' : (br.kind === 'A' ? '串进被测回路' : (br.kind === 'ohm' ? '断电、单独接电阻' : '—'));
+var j = 0;
+var lines = ['接法：' + how, br.kind === 'V' ? 'U = ' + br.U + ' V' : (br.kind === 'A' ? 'I = ' + (br.range * 1000).toFixed(0) + ' mA' : (br.kind === 'ohm' ? 'R内 = ' + br.Rint + ' Ω' : 'OFF'))];
+for (j = 0; j < lines.length; j++) { txt(ctx, lines[j], ix + iw / 2, iy + 34 + j * 16, { size: 8.2, align: 'center', color: C.ink2 }); }
+if (br.kind === 'ohm') {
+rbox(ctx, ix + iw / 2 - 22, iy + 62, 44, 18, 'R\\u2093', '', { color: C.blue, lsize: 9 });
+poly(ctx, [[ix + iw / 2 - 40, iy + 71], [ix + iw / 2 - 22, iy + 71]], { color: C.wire, w: 1.6 });
+poly(ctx, [[ix + iw / 2 + 22, iy + 71], [ix + iw / 2 + 40, iy + 71]], { color: C.wire, w: 1.6 });
+txt(ctx, '黑笔侧电势高', ix + iw / 2, iy + 94, { size: 7.8, align: 'center', color: C.ink3 });
+}
+}
+}
+
+function vMechZero(ctx, W, H, st) {
+var t0 = top(st), b0 = bot(H, st), hh = b0 - t0;
+var narrow = W < 760;
+var R = Math.min(narrow ? W * 0.34 : W * 0.26, hh * 0.58);
+var cx = narrow ? W / 2 : W * 0.36, cy = t0 + hh * (narrow ? 0.58 : 0.62);
+var scr = st.screw == null ? 0.6 : st.screw;
+var off = P.mechOffset(scr);
+var f = P.clamp(0 + off, -0.03, 1);
+dial(ctx, cx, cy, R, st, { rows: [{ type: 'ohm', mid: 15, mult: 1, label: '' }], f: f, mark: true });
+
+var p0 = pol(cx, cy, R * 1.02, ang(0));
+dot(ctx, p0.x, p0.y, 5, { fill: P.near(off, 0, 0.02) ? C.green : C.red });
+txt(ctx, '左端零位（0 / ∞ 处）', p0.x - (narrow ? 0 : 16), p0.y - 34, { size: narrow ? 9 : 10.5, align: narrow ? 'center' : 'right', color: C.ink2, weight: 700 });
+var pf = pol(cx, cy, R * 1.02, ang(f));
+dot(ctx, pf.x, pf.y, 4.6, { fill: C.red });
+line(ctx, cx, cy, pf.x, pf.y, { color: C.red, w: 1.2, dash: [4, 4] });
+
+var sx = cx, sy = cy + R * 0.52;
+dot(ctx, sx, sy, Math.max(9, R * 0.06), { fill: C.steel1, stroke: C.steel2, w: 2 });
+line(ctx, sx - R * 0.04, sy, sx + R * 0.04, sy, { color: C.ink2, w: 2 });
+line(ctx, sx, sy, sx + R * 0.045 * Math.cos(scr * 2.4), sy + R * 0.045 * Math.sin(scr * 2.4), { color: C.orange, w: 2.4 });
+txt(ctx, '指针定位螺丝', sx, sy + Math.max(16, R * 0.11), { size: narrow ? 9 : 10.5, align: 'center', color: C.orange, weight: 700 });
+if (narrow) { return; }
+var bx = W * 0.66, bw = W - bx - 20;
+card(ctx, bx, t0 + 12, bw, hh - 30, { title: '为什么必须先机械调零', tcolor: C.deep });
+var ok = P.near(off, 0, 0.02);
+txt(ctx, ok ? '✔ 指针已指在左端零位' : '✘ 指针没指零位，偏了 ' + Math.abs(off).toFixed(2) + ' 格比例', bx + 14, t0 + 46, { size: 12, weight: 700, color: ok ? C.green : C.red });
+bullets(ctx, bx + 16, t0 + 72, [
+'表头靠游丝复位，运输、受震、久用后零点会漂',
+'零点不准 → 所有读数整体偏移（不是随机误差）',
+'V / A 挡的零位在左端 0；欧姆挡的零位在左端 ∞',
+'所以测量前先看指针：不指零位，就旋螺丝校正'
+], { size: 11.5, step: 20 });
+var y2 = t0 + 176;
+rect(ctx, bx + 14, y2, bw - 28, Math.min(108, b0 - y2 - 12), { fill: C.note, stroke: C.noteLine, w: 1, r: 8 });
+txt(ctx, '零点偏 ±0.06 时（×100 挡，真值 1500 Ω）：', bx + 26, y2 + 20, { size: 11, color: C.deep, weight: 700 });
+var rPlus = P.mechRead(1500, 100, 1, 1), rMinus = P.mechRead(1500, 100, 1, -1);
+txt(ctx, '指针偏右 → 读数 ' + Math.round(rPlus) + ' Ω（偏小 ' + Math.round((1 - rPlus / 1500) * 100) + '%）', bx + 26, y2 + 42, { size: 11, color: C.red });
+txt(ctx, '指针偏左 → 读数 ' + Math.round(rMinus) + ' Ω（偏大 ' + Math.round((rMinus / 1500 - 1) * 100) + '%）', bx + 26, y2 + 62, { size: 11, color: C.red });
+txt(ctx, '所以第一步永远是：机械调零', bx + 26, y2 + 86, { size: 11.5, color: C.orange, weight: 700 });
+}
+
 function draw(ctx, W, H, st) {
 ctx.clearRect(0, 0, W, H);
 var g = ctx.createLinearGradient(0, 0, 0, H);
@@ -1706,7 +1917,8 @@ var map = {
 bench: vBench, needs: vNeeds, formula: vFormula, migrate: vMigrate,
 rangeDesign: vRangeDesign, taps: vTaps, dial: vDialBox, law: vLaw,
 errBar: vErrBar, ohmTable: vOhmTable, probe: vProbe, ohmCircuit: vOhmCircuit,
-wire: vWire, threeFigs: vThreeFigs, compose: vCompose, ops: vOps, spec: vSpec
+wire: vWire, threeFigs: vThreeFigs, compose: vCompose, ops: vOps, spec: vSpec,
+schematic: vSchematic, mechZero: vMechZero
 };
 (map[v] || vDialBox)(ctx, W, H, st);
 }
@@ -1740,8 +1952,8 @@ U: { type: 'range', label: '电压量程 U', min: 0.5, max: 15, step: 0.5, fmt: 
 I: { type: 'range', label: '电流量程 I', min: 0.01, max: 1, step: 0.01, fmt: 'amp' },
 rg: { type: 'range', label: '表头内阻 Rg', min: 10, max: 500, step: 1, fmt: 'ohm' },
 f: { type: 'range', label: '偏转比 f', min: 0.02, max: 1, step: 0.005, fmt: 'fnum' },
-screw: { type: 'range', label: '机械调零螺丝', min: 0, max: 1, step: 0.05, fmt: 'pct' },
-row: { type: 'buttons', label: '刻度排', opts: [[1, '0–250 V'], [2, '0–50 V'], [3, '0–10 V']] },
+screw: { type: 'range', label: '机械调零螺丝', min: -1, max: 1, step: 0.05, fmt: 'screw' },
+row: { type: 'buttons', label: '刻度排', opts: [[1, 'Ω 尺'], [2, '0–250'], [3, '0–50'], [4, '0–10']] },
 obj: { type: 'buttons', label: '测量对象', opts: [[1, '① 干电池'], [2, '② 小灯泡'], [3, '③ 一段电阻']] },
 mult: { type: 'buttons', label: '倍率', opts: [[1, '×1'], [10, '×10'], [100, '×100'], [1000, '×1k']] },
 tapKind: { type: 'buttons', label: '看哪一挡', opts: [['volt', '电压挡'], ['amp', '电流挡']] },
@@ -1758,7 +1970,7 @@ hoverWire: { type: 'buttons', label: '悬停哪条线', opts: [[-1, '不悬停']
 tapBC: { type: 'buttons', label: '接哪个抽头', opts: [['B', '抽到 B（3 V）'], ['C', '抽到 C（10 V）']] },
 ckRed: { type: 'buttons', label: '红笔接', opts: [['A', 'A（公共端）'], ['B', 'B'], ['C', 'C']] },
 check: { type: 'action', label: '检查接线' },
-pos: { type: 'buttons', label: '选择开关', opts: [[1, '①10 mA'], [2, '②100 mA'], [3, '③×100'], [4, '④×1k'], [5, '⑤3 V'], [6, '⑥10 V'], [0, 'OFF']] },
+pos: { type: 'buttons', label: '选择开关', opts: [[1, '①10 mA'], [2, '②100 mA'], [3, '③Ω×100'], [4, '④Ω×1k'], [5, '⑤3 V'], [6, '⑥10 V'], [0, 'OFF']] },
 ops: { type: 'buttons', label: '第几步', opts: [['screw', '①机械调零'], ['range', '②选挡'], ['zero', '③欧姆调零'], ['hookup', '④测量'], ['read', '⑤读数'], ['reset', '⑥复位']] },
 opsRange: { type: 'buttons', label: '量程', opts: [[1, '1 V'], [3, '3 V'], [10, '10 V']] },
 hookup: { type: 'buttons', label: '红笔接到', opts: [[0, '抽头 B'], [1, '公共端 A']] },
@@ -1766,7 +1978,7 @@ screwZero: { type: 'buttons', label: '归零', opts: [[0, '还没归零'], [1, '
 fill: { type: 'panel' },
 quiz: { type: 'panel' }
 };
-var ORDER = ['obj', 'need', 'probe', 'pMode', 'swap', 'dir', 'addBattery', 'tapKind', 'tap', 'fig', 'figMode', 'hoverWire', 'tapBC', 'ckRed', 'check', 'row', 'mult', 'pos', 'ops', 'opsRange', 'hookup', 'screwZero', 'needle', 'rx', 'zero', 'U', 'I', 'rg', 'f', 'screw', 'fill', 'quiz'];
+var ORDER = ['obj', 'need', 'pos', 'ops', 'probe', 'pMode', 'swap', 'dir', 'addBattery', 'tapKind', 'tap', 'fig', 'figMode', 'hoverWire', 'tapBC', 'ckRed', 'check', 'row', 'mult', 'opsRange', 'hookup', 'screwZero', 'needle', 'rx', 'zero', 'U', 'I', 'rg', 'f', 'screw', 'fill', 'quiz'];
 
 function norm(s) {
 return String(s || '').replace(/\s|　/g, '').replace(/[−–—]/g, '-').replace(/[（）]/g, function (m) { return m === '（' ? '(' : ')'; })
@@ -1774,9 +1986,9 @@ return String(s || '').replace(/\s|　/g, '').replace(/[−–—]/g, '-').repla
 }
 var FILL = {
 v_series: { label: '改装成电压表：____ 联', accept: ['串', '串联'], hint: '串（串联分压）', wrong: { '并': '串并写反了：电压表要串联分压' } },
-v_formula: { label: 'R = ______', accept: ['r=u/ig-rg', 'u/ig-rg', 'r=(u/ig)-rg', 'r=u/ig−rg', '(u/ig)-rg', 'u/ig−rg', 'u/ig-rg'], hint: 'R = U/Ig − Rg', wrong: { '-rg/u': '分子分母写反了：R = U/Ig − Rg', 'u/(ig-rg)': '分子分母写反了：R = U/Ig − Rg', '/(u/ig)': '分子分母写反了：R = U/Ig − Rg' } },
+v_formula: { label: 'R = ______', accept: ['r=u/ig-rg', 'u/ig-rg', 'r=(u/ig)-rg', '(u/ig)-rg', 'u/ig−rg', 'r=u/ig−rg'], hint: 'R = U/Ig − Rg', wrong: { '-rg/u': '分子分母写反了：R = U/Ig − Rg', 'u/(ig-rg)': '分子分母写反了：R = U/Ig − Rg', '/(u/ig)': '分子分母写反了：R = U/Ig − Rg' } },
 a_series: { label: '改装成电流表：____ 联', accept: ['并', '并联'], hint: '并（并联分流）', wrong: { '串': '串并写反了：电流表要并联分流' } },
-a_formula: { label: 'R = ______', accept: ['r=igrg/(i-ig)', 'igrg/(i-ig)', 'ig*rg/(i-ig)', 'r=ig*rg/(i-ig)', 'r=igrg/(i−ig)', 'igrg/(i−ig)'], hint: 'R = IgRg/(I − Ig)', wrong: { '/(igrg)': '分子分母写反了：R = IgRg/(I − Ig)', '(i-ig)/': '分子分母写反了：R = IgRg/(I − Ig)' } }
+a_formula: { label: 'R = ______', accept: ['r=igrg/(i-ig)', 'igrg/(i-ig)', 'ig*rg/(i-ig)', 'r=ig*rg/(i-ig)', 'igrg/(i−ig)', 'r=igrg/(i−ig)'], hint: 'R = IgRg/(I − Ig)', wrong: { '/(igrg)': '分子分母写反了：R = IgRg/(I − Ig)', '(i-ig)/': '分子分母写反了：R = IgRg/(I − Ig)' } }
 };
 function checkFill(id, val) {
 var spec = FILL[id];
@@ -1797,13 +2009,11 @@ return {
 step: 0, act: '', title: '', hint: '', note: '', formula: '',
 allow: [], rng: {}, dragKey: null, view: 'dial',
 headline: '', tag: '', conclusion: '',
-
-needle: 0.5, rx: 15, zero: 1, U: 3, I: 0.6, rg: 100, fManual: 0.5, screw: 0,
+needle: 0.5, rx: 15, zero: 1, U: 3, I: 0.6, rg: 100, fManual: 0.5, screw: 0.6,
 obj: 1, need: 1, probe: 2, swap: 0, pMode: 'V', dir: null, addBattery: 1, kind: 'volt',
 tapKind: 'volt', tap: 1, row: 3, mult: 100, fig: 'V', figMode: 'good',
 hoverWire: -1, tapBC: 'B', ckRed: 'A', pos: 5, ops: 'screw', opsRange: 3,
 hookup: 1, screwZero: 0, checked: 0, lawRx: 300,
-
 fShow: 0, Ima: 0, Uma: 0, readTxt: '—', scaleTxt: '—',
 rows: [], dialLines: [], dialNotes: [], dialNoteTitle: '',
 showRec: false, markRule: false, markRuleAll: false, noExpand: false, showPos6: false, showBoxes: false, needRows: false,
@@ -1815,21 +2025,8 @@ function rowHead() { return { type: 'uni', max: 1, div: 0.02, unit: 'mA', label:
 function rowVolt(U, label) { var d = P.divOf(U); return { type: 'uni', max: U, div: d.div, unit: 'V', label: label || ('0 – ' + U + ' V') }; }
 function rowOhm(mult, label) { return { type: 'ohm', mid: P.ohmScaleMid(mult), mult: mult, label: label || ('Ω 尺（中值 ' + P.ohmScaleMid(mult) + '）') }; }
 
-function dialPanel(st) {
-var p1 = [], p2 = [];
-if (st.view === 'dial' && st.mode === 'ohm') {
-var m = st.mult, Rin = P.ohmRint(m), r = P.ohmRead(st.rx, m, st.zero);
-p1 = [['倍率', '×' + m, 'red'], ['中值 R中', fmtOhm(Rin), 'blue'], ['表内电阻 R内', fmtOhm(Rin), 'blue']];
-p2 = [['被测电阻 R\u2093', fmtOhm(st.rx), 'ink'], ['偏转比 f', r.f.toFixed(3), 'ink'], ['刻度读数（×1 尺）', fmtOhm(r.scale), 'blue']];
-return { p1: p1, p2: p2, total: fmtOhm(r.read) };
-}
-var U = st.mode === 'A' ? st.U : st.U;
-var d = P.divOf(U);
-var f = st.needle;
-var u = P.readUniform(f, U, d.div);
-p1 = [['量程', P.fmt(U, 2) + ' V', 'blue'], ['最小分度', P.fmt(d.div, 3) + ' V', 'blue'], ['小格数', d.cells + ' 格', 'ink'], ['分度族', P.divFamily(d.div) || '—', 'orange']];
-p2 = [['偏转比 f', f.toFixed(3), 'ink'], ['刻度值 = f × 量程', (f * U).toFixed(2) + ' V', 'blue'], ['估读位', '分度段 ' + P.fmt(P.estStep(d.div), 3) + ' → 读 ' + u.dec + ' 位', 'orange']];
-return { p1: p1, p2: p2, total: u.shown + ' V' };
+function rowsTextbook() {
+return [rowOhm(100, 'Ω'), rowVolt(250, '0–250'), rowVolt(50, '0–50'), rowVolt(10, '0–10')];
 }
 function fmtOhm(v) {
 if (!isFinite(v) || v > 1e7) { return '∞'; }
@@ -1837,14 +2034,36 @@ if (v >= 1000) { return (v / 1000).toFixed(v >= 10000 ? 0 : 2) + ' kΩ'; }
 return P.fmt(v, 2) + ' Ω';
 }
 
+function dialPanel(st) {
+var p1 = [], p2 = [];
+if (st.view === 'dial' && st.mode === 'ohm') {
+var m = st.mult, Rin = P.ohmRint(m), r = P.ohmRead(st.rx, m, st.zero);
+p1 = [['倍率', '×' + m, 'red'], ['中值 R中', fmtOhm(Rin), 'blue'], ['表内电阻 R内', fmtOhm(Rin), 'blue']];
+p2 = [['被测电阻 R\u2093', fmtOhm(st.rx), 'ink'], ['偏转比 f', r.f.toFixed(3), 'ink'], ['刻度读数（该挡尺）', fmtOhm(r.scale), 'blue']];
+return { p1: p1, p2: p2, total: fmtOhm(r.read), rules: [] };
+}
+if (st.view === 'dial' && st.mode === 'V' && (st.rows || []).length >= 2) {
+var rows = st.rows, i;
+for (i = 0; i < rows.length; i++) {
+if (rows[i].type === 'ohm') { p1.push(['Ω 尺', '0 Ω 在右 · ∞ 在左（中值 ' + rows[i].mid + '）', 'red']); continue; }
+p1.push(['0–' + rows[i].max + ' ' + (rows[i].unit || ''), (P.scaleValueOf(st.needle, rows[i].max)).toFixed(2) + ' ' + (rows[i].unit || ''), i === 0 ? 'blue' : 'ink']);
+}
+p2 = [['偏转比 f', st.needle.toFixed(3), 'ink'], ['同角位比值', '250 : 50 : 10 = 25 : 5 : 1', 'orange']];
+return { p1: p1, p2: p2, total: (P.scaleValueOf(st.needle, 10)).toFixed(2) + ' V（0–10 排）', rules: [] };
+}
+var U = st.U, d = P.divOf(U), f = st.needle, u = P.readUniform(f, U, d.div);
+p1 = [['量程', P.fmt(U, 2) + ' V', 'blue'], ['最小分度', P.fmt(d.div, 3) + ' V', 'blue'], ['小格数', d.cells + ' 格', 'ink'], ['分度族', P.divFamily(d.div) || '—', 'orange']];
+p2 = [['偏转比 f', f.toFixed(3), 'ink'], ['刻度值 = f × 量程', (f * U).toFixed(2) + ' V', 'blue'], ['估读位', '分度段 ' + P.fmt(P.estStep(d.div), 3) + ' → 读 ' + u.dec + ' 位', 'orange']];
+return { p1: p1, p2: p2, total: u.shown + ' V', rules: [] };
+}
+
 var STEPS = [
 
 {
 act: A0, view: 'bench', title: '手上只有一只表头：能测的只有 0~1 mA、0~0.1 V',
 hint: '拖底栏<b>「指针位置」</b>，看右栏的 I 与 U 怎么变 —— 这只表头只会做一件事：量电流',
-note: '表头的三个参数是<b>固定的</b>：满偏电流 Ig = 1 mA、内阻 Rg = 100 Ω，所以满偏电压 Ug = Ig·Rg = <b>0.1 V</b>。' +
-'它只能测 0~1 mA 的电流、0~0.1 V 的电压。要是直接去接 1.5 V 干电池：I = 1.5/100 = 15 mA = <b>15 倍满偏</b>，指针打飞。' +
-'桌上还有一盒标准电阻、两节干电池、红黑表笔 —— 这节课要做的事，就是<b>给它加外围，把量程设计出来</b>。',
+note: '表头三个参数固定：Ig = 1 mA、Rg = 100 Ω，满偏电压 Ug = <b>0.1 V</b>。直接接 1.5 V 干电池：I = 1.5/100 = 15 mA = <b>15 倍满偏</b>，指针打飞。' +
+'桌上还有一盒标准电阻、两节干电池、红黑表笔 —— 这节课要做的，就是把它<b>设计</b>成一只多用电表。',
 formula: 'Ug = Ig · Rg = 1 mA × 100 Ω = 0.1 V',
 headline: '起点：一只 1 mA 表头 + 一盒电阻', tag: 'Ig = 1 mA · Rg = 100 Ω · Ug = 0.1 V',
 conclusion: '表头只能测电流；要测别的，必须设计外围电路',
@@ -1854,8 +2073,8 @@ init: function (st) { st.needle = 0.5; st.rows = [rowHead()]; }
 {
 act: A0, view: 'needs', title: '今天要测三样东西：电压、电流、电阻',
 hint: '点底栏<b>「测量对象」</b>①②③，右栏显示这一项要读的是电压 / 电流 / 电阻',
-note: '① 一节干电池的电压，约 <b>1.5 V</b>；② 通过小灯泡的电流，约 <b>0.3 A</b>；③ 一段电阻的阻值，<b>未知</b>（几十 Ω ~ 几 kΩ）。' +
-'现在先<b>不问计算</b>，只问一句：这三样，表头能测哪一样？<br>答案是<b>一样也测不了</b> —— 表头只认 1 mA 的电流。',
+note: '① 一节干电池的电压约 <b>1.5 V</b>；② 通过小灯泡的电流约 <b>0.3 A</b>；③ 一段电阻的阻值<b>未知</b>。' +
+'先只问一句：这三样，表头能测哪一样？答案是<b>一样也测不了</b> —— 表头只认 1 mA 的电流。',
 formula: '对象 → 要读的量：V / A / Ω',
 headline: '三个测量对象，三种物理量', tag: '先看对象，再想表该怎么改',
 conclusion: '表头一样也测不了 —— 三样东西要三套外围电路',
@@ -1865,8 +2084,8 @@ init: function (st) { st.obj = 1; st.needRows = true; }
 {
 act: A0, view: 'needs', title: '所以：每一样都要一个"量程"',
 hint: '这一屏是纯结论：<b>没有可拖的东西</b>（后面每一块做完，都回到这张表打勾）',
-note: '把三样对象翻成"需要的能力"：<br>① 干电池 1.5 V → 量程 ≥ 1.5 V；② 小灯泡 0.3 A → 量程 ≥ 0.3 A；③ 一段电阻 → 能自己产生电流。' +
-'三样东西，三个不同的"量程需求"，一只表头做不到 —— 所以要<b>给它设计量程</b>。这张表是后面每一幕的靶子。',
+note: '① 1.5 V → 量程 ≥ 1.5 V；② 0.3 A → 量程 ≥ 0.3 A；③ 一段电阻 → 能自己产生电流。' +
+'三样东西，三个量程需求，一只表头做不到 —— 所以要<b>给它设计量程</b>。这张表是后面每一幕的靶子。',
 formula: '需求表：测量对象 → 要读的量 → 需要的能力',
 headline: '需求表：全课件的靶子', tag: '第 0 幕收束 · 这一屏不需要拖动',
 conclusion: '三样东西，三个量程需求 —— 于是有了"设计量程"这件事',
@@ -1877,10 +2096,9 @@ init: function (st) { st.needRows = true; }
 {
 act: A1, view: 'formula', title: '两条公式还在不在（11.4(2) 学过）',
 hint: '在右栏的四个空里填答案，点<b>「对答案」</b>逐空判对错',
-note: '这一屏<b>不讲解，只对答案</b>。填错的学生别停在这 —— 下一幕边做边补，第 2 幕会把这两条公式重新推一遍。' +
-'判分能认出两种典型错：<b>串并写反</b>、<b>公式分子分母写反</b>。',
+note: '这一屏<b>不讲解，只对答案</b>。判分能认出两种典型错：<b>串并写反</b>、<b>公式分子分母写反</b>。',
 formula: '电压表：串联，R = U/Ig − Rg　　电流表：并联，R = IgRg/(I − Ig)',
-headline: '唤醒：改装的两种连接方式与两条公式', tag: '不讲解，只对答案',
+headline: '唤醒：两种连接方式与两条公式', tag: '不讲解，只对答案',
 conclusion: '两条公式：串联分压 R = U/Ig − Rg；并联分流 R = IgRg/(I − Ig)',
 allow: ['fill'], dragKey: null,
 init: function (st) { st.rows = []; }
@@ -1888,9 +2106,8 @@ init: function (st) { st.rows = []; }
 {
 act: A1, view: 'migrate', title: '换一组参数：Rg 从 30 Ω 换成 100 Ω',
 hint: '拖底栏<b>「表头内阻 Rg」</b>（10 ~ 500 Ω），右边一列的两个答案实时变',
-note: '旧题：Rg = 30 Ω 时，3 V 挡要串 <b>2970 Ω</b>、0.6 A 挡要并 <b>0.05 Ω</b>。' +
-'今天换成 Rg = 100 Ω：3 V 挡 → <b>2900 Ω</b>、0.6 A 挡 → <b>0.1669 Ω</b>。' +
-'公式没变，只是代入的数变了 —— <b>这一步是诊断</b>：算得出说明真会了，算不出留到第 2 幕补。',
+note: '旧题：Rg = 30 Ω 时，3 V 挡串 <b>2970 Ω</b>、0.6 A 挡并 <b>0.05 Ω</b>。今天 Rg = 100 Ω：3 V 挡 → <b>2900 Ω</b>、0.6 A 挡 → <b>0.1669 Ω</b>。' +
+'公式没变，只是代入的数变了 —— 算得出说明真会了，算不出留到第 2 幕补。',
 formula: 'R串 = U/Ig − Rg　　R并 = IgRg/(I − Ig)',
 headline: '当场迁移：同一套公式，换一组参数', tag: 'Rg = 30 Ω（旧题） vs Rg = 100 Ω（今天）',
 conclusion: 'Rg = 100 Ω 时：3 V 挡 2900 Ω；0.6 A 挡 0.1669 Ω',
@@ -1901,11 +2118,10 @@ init: function (st) { st.rg = 100; st.rows = []; }
 {
 act: A2, view: 'needs', title: '量程不是随便定的：对象决定量程',
 hint: '点底栏<b>「测量对象」</b>①②③，看每一行推荐哪一挡、为什么',
-note: '通用规则：<b>量程取"最小的 ≥ 2×被测值"的那一挡</b>。<br>① 1.5 V → 推荐 <b>3 V</b>（1.5 V 正好落在正中间，最好读）；' +
-'② 0.3 A → 推荐 <b>0.6 A</b>（同样落在中间）；③ 一段电阻 → <b>没有量程可选</b>，要靠换倍率。<br>' +
-'要问的问题：<b>为什么量程不能刚好 1.5 V？</b> 因为指针会打到满偏，而且看不出"稍微超了一点"；留一半余量才安全、才好读。',
+note: '规则：<b>取"最小的 ≥ 2× 被测值"的那一挡</b>。① 1.5 V → <b>3 V</b>（正好落在正中间，最好读）；② 0.3 A → <b>0.6 A</b>；' +
+'③ 一段电阻 → 没有量程可选，要靠换倍率。<br>要问的问题：<b>为什么量程不能刚好 1.5 V？</b> 指针会打到满偏，也看不出"稍微超了一点"。',
 formula: '推荐量程 = 最小的 ≥ 2 × 被测值 的标准量程',
-headline: '对象 → 量程：这是全课件最重要的一次"设计决定"', tag: '1.5 V → 3 V 挡 · 0.3 A → 0.6 A 挡',
+headline: '对象 → 量程：全课件最重要的一次"设计决定"', tag: '1.5 V → 3 V 挡 · 0.3 A → 0.6 A 挡',
 conclusion: '规则 ②：量程选略大于被测值、留约一半余量（指针落在中间最好读）',
 allow: ['obj'], dragKey: null,
 init: function (st) { st.obj = 1; st.showRec = true; }
@@ -1913,9 +2129,8 @@ init: function (st) { st.obj = 1; st.showRec = true; }
 {
 act: A2, view: 'rangeDesign', title: '电压挡：算出要串多大电阻',
 hint: '拖底栏<b>「电压量程 U」</b>（0.5 ~ 15 V），看 R串 与电压表内阻怎么变',
-note: '满偏时表头只肯分到 0.1 V，剩下的全压在串联电阻上：<b>Ig(Rg + R) = U</b>，所以 <b>R = U/Ig − Rg</b>。' +
-'要 3 V 量程：R = 3/1 mA − 100 = <b>2900 Ω</b>。<br>改装后的电压表内阻 R_V = Rg + R = U/Ig —— 量程越大，R_V 越大。' +
-'先让学生自己填 3 V 那个空，再点开算。',
+note: '满偏时表头只肯分到 0.1 V，剩下的全压在串联电阻上：<b>Ig(Rg + R) = U</b> → <b>R = U/Ig − Rg</b>。' +
+'3 V 量程：R = 3/1 mA − 100 = <b>2900 Ω</b>。改装后内阻 R_V = Rg + R = U/Ig —— 量程越大，R_V 越大。',
 formula: 'R = U/Ig − Rg　　R_V = Rg + R = U/Ig',
 headline: '电压挡 = 表头串联一个大电阻', tag: '3 V 挡 → 串 2900 Ω · R_V = 3000 Ω',
 conclusion: '量程越大，要串的电阻越大（R_V = U/Ig）',
@@ -1925,9 +2140,8 @@ init: function (st) { st.kind = 'volt'; st.U = 3; st.rows = []; }
 {
 act: A2, view: 'rangeDesign', title: '电流挡：算出要并多大电阻',
 hint: '拖底栏<b>「电流量程 I」</b>（0.01 ~ 1 A），看分流电阻怎么变 —— 量程越大，它反而越小',
-note: '要测大电流，就得给大部分电流开一条"旁路"：<b>IgRg = (I − Ig)R</b>，所以 <b>R = IgRg/(I − Ig)</b>。' +
-'要 0.6 A 量程：R = 1 mA×100 Ω /(0.6 − 1 mA) = <b>0.1669 Ω</b>。<br>改装后的电流表内阻 R_A = Rg∥R = 0.1667 Ω，' +
-'<b>永远小于 Rg</b>。要问的问题：为什么量程越大，这个电阻反而越小？',
+note: '要测大电流，就给大部分电流开一条旁路：<b>IgRg = (I − Ig)R</b> → <b>R = IgRg/(I − Ig)</b>。' +
+'0.6 A 量程：R = 1 mA×100 Ω /(0.6 − 1 mA) = <b>0.1669 Ω</b>；内阻 R_A = Rg∥R = 0.1667 Ω，<b>永远小于 Rg</b>。',
 formula: 'R = IgRg/(I − Ig)　　R_A = Rg∥R',
 headline: '电流挡 = 表头并联一个小电阻', tag: '0.6 A 挡 → 并 0.1669 Ω · R_A = 0.1667 Ω',
 conclusion: '量程越大，分流电阻越小（R_A 永远小于 Rg）',
@@ -1935,22 +2149,22 @@ allow: ['I'], dragKey: 'I',
 init: function (st) { st.kind = 'amp'; st.I = 0.6; st.rows = []; }
 },
 {
-act: A2, view: 'taps', title: '一个量程不够：一串电阻 + 抽头装下多个量程',
-hint: '点底栏<b>「看哪一挡」「抽头」</b>，看每一档要接在哪两个点上',
-note: '电压挡：一串电阻从不同位置抽头，相邻差依次是 <b>900 / 2000 / 7000 Ω</b>；电流挡：一组分流电阻选通其中一个。' +
-'共同点：<b>一次算总账，再用减法分档</b> —— 不是每个量程各做一套电阻。<br>' +
-'这一屏只讲"减法"，<b>不讲工程实现</b>：只说串起来就能抽头，不展开开关触点怎么排。',
-formula: '电压挡相邻差 = R(3)−R(1) = 2000 Ω　R(10)−R(3) = 7000 Ω',
-headline: '多量程：一串电阻，从不同位置抽头', tag: '相邻差 900 / 2000 / 7000 Ω',
-conclusion: '多个量程共用一串电阻，靠抽头分档（两档不能同时接入）',
+act: A2, view: 'taps', title: '一只表，多个档位：对象决定量程，量程决定档位',
+hint: '点底栏<b>「看哪一挡」「抽头」</b>切换，下面是四档电流挡与四档电压挡的参数表',
+note: '为什么要有<b>多个档位</b>？因为一只电流表要面对<b>多种电流</b>（10 mA 的小灯泡、0.6 A 的灯泡、3 A 的电机），' +
+'量程太大读不准、太小会打表 —— 所以一个量程不够，要设计<b>一整排档位</b>。<br>' +
+'实现办法：电压挡用<b>一串电阻、从不同位置抽头</b>（相邻差 900 / 2000 / 7000 Ω）；电流挡用<b>一组分流电阻、选通其中一个</b>。一次算总账，再用减法分档。',
+formula: '电流四档：10 mA / 100 mA / 0.6 A / 3 A　　电压四档：1 V / 3 V / 10 V / 15 V',
+headline: '多档设计：一串电阻抽头 + 一组分流电阻选通', tag: '电流 10 mA→11.11 Ω · 3 A→0.0333 Ω；电压 1 V→900 Ω · 15 V→14900 Ω',
+conclusion: '多个量程共用一串电阻，靠抽头/选通分档（两档不能同时接入）',
 allow: ['tapKind', 'tap'], dragKey: null,
 init: function (st) { st.tapKind = 'volt'; st.tap = 1; st.rows = []; }
 },
 {
 act: A2, view: 'needs', title: '回扣需求表：①② 两行打勾',
 hint: '点底栏<b>「测量对象」</b>回看每一行的推荐量程',
-note: '① 干电池 1.5 V → <b>3 V 挡</b>，R串 = 2900 Ω；② 小灯泡 0.3 A → <b>0.6 A 挡</b>，R并 = 0.1669 Ω；' +
-'③ 一段电阻 → <b>还没做</b>，等第 5 幕。<br>规则 ①：电压表并联接在被测两点之间。规则 ②：量程略大于被测值、留约一半余量。',
+note: '① 干电池 1.5 V → <b>3 V 挡</b>，R串 = 2900 Ω；② 小灯泡 0.3 A → <b>0.6 A 挡</b>，R并 = 0.1669 Ω；③ 一段电阻 → <b>还没做</b>，等第 5 幕。' +
+'规则 ①：电压表并联接在被测两点之间；规则 ②：量程略大于被测值、留约一半余量。',
 formula: '① 3 V 挡 · R串 = 2900 Ω　　② 0.6 A 挡 · R并 = 0.1669 Ω',
 headline: '回扣需求表：两行打勾，一行待办', tag: '规则 ① 并联 · 规则 ② 留一半余量',
 conclusion: '需求表的 ①② 已完成 —— 剩下的第 ③ 项要用欧姆挡',
@@ -1973,9 +2187,8 @@ init: function (st) { st.needle = 0.4; st.rows = [rowHead()]; }
 act: A3, view: 'dial', title: '改成 3 V 挡后，刻度怎么标：先定分度，再定格数',
 hint: '拖底栏<b>「电压量程 U」「指针位置」</b>，看刻度值 = f × U 怎么变',
 note: '同一根指针，刻度数字换成电压值：<b>刻度值 = f × 量程</b>。<br>' +
-'⚠ 分度必须"整齐"：教材 P73 只承认三类 —— <b>十分法 1/0.1/0.01</b>、二分法 2/0.2/0.02、五分法 5/0.5/0.05。' +
-'3 V ÷ 50 = 0.06 V 不属任何一类，学生根本没法估读；正确做法是<b>先定分度 0.1 V，再定格数 30 格</b>，属十分法 → 读到 0.01 V。' +
-'3 V 半偏时读 <b>1.50 V</b>。',
+'⚠ 分度必须"整齐"：教材只承认三类 —— 十分法 1/0.1/0.01、二分法 2/0.2/0.02、五分法 5/0.5/0.05。' +
+'3 V ÷ 50 = 0.06 V 不属任何一类，学生没法估读；正确做法是<b>先定分度 0.1 V，再定格数 30 格</b>（十分法 → 读到 0.01 V）。3 V 半偏读 <b>1.50 V</b>。',
 formula: '刻度值 = f × 量程　分度取整齐值：3 V → 0.1 V / 30 格（十分法 → 读 0.01 V）',
 headline: '改量程 = 改刻度数字，指针的物理位置不变', tag: '3 V → 分度 0.1 V · 30 格 · 十分法',
 conclusion: '先定分度、再定格数；分度必须落在教材三类里',
@@ -1983,16 +2196,15 @@ allow: ['U', 'needle'], dragKey: 'U',
 init: function (st) { st.U = 3; st.needle = 0.5; st.rows = [rowVolt(3), rowHead()]; }
 },
 {
-act: A3, view: 'dial', title: '多个量程共用一条刻度线：比值恒为 25 : 5 : 1',
-hint: '点底栏<b>「刻度排」</b>切三排，拖<b>「指针位置」</b>；切排时指针不动，只是换个尺去读',
-note: '三条刻度线（0–250 / 0–50 / 0–10）同角位对齐，同一角位的读数比值<b>恒为 25 : 5 : 1</b>：' +
-'50 / 10 / 2、100 / 20 / 4、150 / 30 / 6。<br>为什么不用三条独立的表盘？<b>因为只有一根指针</b>。' +
-'10 V 挡分度 0.2 V（50 格）属二分法 → 读到 0.1 V，<b>不是 0.04 V</b>。',
+act: A3, view: 'dial', title: '课本 11.5 的表盘：一排 Ω 尺 + 三排共线的均匀尺',
+hint: '点底栏<b>「刻度排」</b>切三排均匀尺，拖<b>「指针位置」</b>；切排时指针不动，只是换个尺去读',
+note: '这就是课本 11.5 表盘的排法：<b>最上一排是 Ω 尺</b>（0 Ω 在右、∞ 在左，反向且不均匀），下面<b>三排均匀尺共用一条刻度线</b>：0–250 / 0–50 / 0–10，' +
+'同一角位的读数比值<b>恒为 25 : 5 : 1</b>（50/10/2、100/20/4、150/30/6）。<br>为什么不用三个表盘？<b>因为只有一根指针</b>。10 V 挡分度 0.2 V（50 格）属二分法 → 读到 0.1 V。',
 formula: '同一角位：250 : 50 : 10 = 25 : 5 : 1',
-headline: '三排刻度共用一条线：量程变了，只是换把尺', tag: '10 V 挡分度 0.2 V（二分法）→ 读 0.1 V',
+headline: '课本表盘：一排 Ω 尺 + 三排均匀尺共用一条线', tag: '10 V 挡分度 0.2 V（二分法）→ 读 0.1 V',
 conclusion: '"量程设计"和"刻度设计"是一对：改一个必须改另一个',
 allow: ['row', 'needle'], dragKey: 'needle',
-init: function (st) { st.row = 3; st.needle = 0.6; st.rows = [rowVolt(250), rowVolt(50), rowVolt(10)]; }
+init: function (st) { st.row = 3; st.needle = 0.6; st.rows = rowsTextbook(); }
 },
 
 {
@@ -2010,8 +2222,7 @@ init: function (st) { st.probe = 2; st.pMode = 'V'; st.rows = []; }
 act: A4, view: 'probe', title: '为什么一红一黑：表头只能单向偏转',
 hint: '点底栏<b>「接法」</b>把红黑对调，看指针反向打到底并报警',
 note: '表头是磁电式的：电流方向反了，指针就往反方向打（会打坏）。所以必须规定"电流从哪根笔流进"：' +
-'约定 <b>红笔 = 电流流入端（插 "+" 孔）</b>、<b>黑笔 = 电流流出端（插 "−" 孔）</b>—— 一句话：<b>红进黑出</b>。<br>' +
-'让学生自己发现"接反了指针会往反方向打"，这是设计约束的来源，不是规定。',
+'约定 <b>红笔 = 电流流入端</b>、<b>黑笔 = 电流流出端</b> —— 一句话：<b>红进黑出</b>。让学生自己发现"接反了指针往反方向打"。',
 formula: '红进黑出：I > 0 → 指针正向偏；I < 0 → 反向打（reverse）',
 headline: '一红一黑：约定"电流从哪根笔流进表头"', tag: '电压 / 电流挡：红笔侧电势高',
 conclusion: '规则 ③：电流从红表笔流入表头（红进黑出）',
@@ -2021,9 +2232,8 @@ init: function (st) { st.probe = 2; st.swap = 0; st.pMode = 'V'; st.rows = []; }
 {
 act: A4, view: 'probe', title: '欧姆挡为什么"反了"：表里有电池，正极接黑笔',
 hint: '点底栏<b>「挡位」</b>在电压挡 / 欧姆挡之间切，看电流路径与"哪根笔电势高"',
-note: '欧姆挡的表里有一节电池。追一遍路径：<b>电池正极 → 黑表笔 → 待测电阻 → 红表笔 → 表头 → 电池负极</b>。' +
-'<br>对外看，电流仍从红笔流入表头（所以"红进黑出"没变）；对内看，<b>电池的正极接在黑笔上</b> —— 所以欧姆挡是<b>黑笔侧电势高</b>。' +
-'学生一旦明白这一点，后面二极管判向就不用背了。',
+note: '欧姆挡的表里有一节电池。追一遍路径：<b>电池正极 → 黑表笔 → 待测电阻 → 红表笔 → 表头 → 电池负极</b>。<br>' +
+'对外看，电流仍从红笔流入表头（"红进黑出"没变）；对内看，<b>电池正极接在黑笔上</b> —— 所以欧姆挡是<b>黑笔侧电势高</b>。',
 formula: '欧姆挡：V黑 > V红；两种挡位下都满足"电流从红笔流入表头"',
 headline: '欧姆挡内部：电池正极接黑笔', tag: '对外红进黑出不变 · 对内黑笔电势高',
 conclusion: '规则 ④：欧姆挡内部电池正极接黑笔 —— 所以黑笔接二极管正极时测的是正向电阻',
@@ -2033,9 +2243,8 @@ init: function (st) { st.pMode = 'V'; st.probe = 2; st.swap = 0; st.rows = []; }
 {
 act: A4, view: 'probe', title: '由此直接推出：二极管怎么判向',
 hint: '点底栏<b>「二极管」</b>换接法，比较两次读数 —— 哪个方向电阻小，那一端就是正极',
-note: '黑笔接二极管正极，电流正好沿着二极管"正向"走 → 电阻小；红笔接正极，电流要逆行 → 电阻大。' +
-'两次读数之比 <b>> 100 : 1</b>，所以判向很干脆：<b>读数小的那一次，黑笔碰的就是正极</b>。' +
-'<br>不变量：无论正反向，电流都从黑笔经二极管流向红笔。',
+note: '黑笔接二极管正极，电流正好沿二极管"正向"走 → 电阻小；红笔接正极，电流逆行 → 电阻大。两次读数之比 <b>> 100 : 1</b>，' +
+'所以判向很干脆：<b>读数小的那一次，黑笔碰的就是正极</b>。<br>不变量：无论正反向，电流都从黑笔经二极管流向红笔。',
 formula: '黑笔接正极 → 正向电阻小（读数比 > 100:1）',
 headline: '二极管判向：从表笔设计直接推出来，不靠背', tag: '读数小的那一次，黑笔碰的是正极',
 conclusion: '欧姆挡 + 红进黑出 → 二极管判向（黑笔接正极为正向）',
@@ -2046,8 +2255,8 @@ init: function (st) { st.dir = 'forward'; st.pMode = 'ohm'; st.probe = 2; st.row
 {
 act: A5, view: 'ohmCircuit', title: '测电阻为什么要自带电源：没有电流就什么也读不出',
 hint: '点底栏<b>「表内电池」</b>装上 / 拆掉电池，看回路里的电流与指针',
-note: '把表头和待测电阻接成一圈 —— 里面没有电源，<b>I = 0，指针不动</b>，什么也读不出来。' +
-'所以欧姆挡必须<b>自己造一股电流去"称"这个电阻</b>：这是它和电压/电流挡最大的区别。',
+note: '把表头和待测电阻接成一圈 —— 里面没有电源，<b>I = 0，指针不动</b>。所以欧姆挡必须<b>自己造一股电流去"称"这个电阻</b>：' +
+'这是它和电压 / 电流挡最大的区别。',
 formula: '无电源 → I = 0；加电源后 I = E/(R内 + R\u2093)，R\u2093 越小 I 越大',
 headline: '欧姆挡自带电源：用电流去"称"电阻', tag: '没有电池 → 指针不动',
 conclusion: '需求表第 ③ 项：要测电阻，表里必须先有电源',
@@ -2055,24 +2264,22 @@ allow: ['addBattery'], dragKey: null,
 init: function (st) { st.addBattery = 0; st.mult = 100; st.rx = 1500; st.zero = 1; st.rows = []; }
 },
 {
-act: A5, view: 'ohmCircuit', title: '电路与 R内：短路要满偏，于是定出调零电阻',
+act: A5, view: 'ohmCircuit', title: '两节电池、两个"调零"：先机械调零，再欧姆调零',
 hint: '拖底栏<b>「被测电阻 R\u2093」「欧姆调零 R₀」</b>，看电流与偏转怎么变',
-note: '回路电流 I = E/(R内 + R\u2093)。<b>表笔下短接（R\u2093 = 0）时要满偏</b>：E/R内 = Ig，于是 R内 = E/Ig = 1.5 V / 1 mA = <b>1500 Ω</b>（×100 挡），R₀ = 1500 − 100 = <b>1400 Ω</b>。<br>' +
-'注意：<b>"欧姆调零"就是在这里被设计出来的</b> —— 不是规定，是"必须让短路时满偏"这个要求逼出来的。R₀ 调小 → f > 1 → 过载。',
+note: '回路电流 I = E/(R内 + R\u2093)。<b>表笔短接（R\u2093 = 0）时要满偏</b>：E/R内 = Ig → R内 = 1.5 V/1 mA = <b>1500 Ω</b>（×100 挡），R₀ = 1500 − 100 = <b>1400 Ω</b>。' +
+'<br>注意两件事分开：<b>机械调零</b>是调"指针的机械零位"（不通电时指针该指左端），<b>欧姆调零</b>是调 R₀（短路时指针压 0 Ω 线）。',
 formula: 'R内 = E/Ig = 1500 Ω（×100 挡）　R₀ = R内 − Rg = 1400 Ω',
-headline: '调零电阻是被"短路要满偏"逼出来的', tag: '×100 挡：R内 = 1500 Ω · R₀ = 1400 Ω',
-conclusion: '规则 ⑥：每次换挡都要重新短接调零',
+headline: '欧姆调零是被"短路要满偏"逼出来的（和机械调零是两件事）', tag: '×100 挡：R内 = 1500 Ω · R₀ = 1400 Ω',
+conclusion: '规则 ⑥：每次换挡都要重新短接（欧姆）调零',
 allow: ['addBattery', 'rx', 'zero'], dragKey: 'rx',
 init: function (st) { st.addBattery = 1; st.mult = 100; st.rx = 1500; st.zero = 1; st.rng = { rx: [0, 12000, 5] }; }
 },
 {
 act: A5, view: 'law', title: '刻度为什么反向、不均匀：f = R内/(R内+R\u2093) 是双曲线',
 hint: '拖底栏<b>「被测电阻 R\u2093」</b>，看红点沿双曲线先陡后平',
-note: '把 I = E/(R内+R\u2093) 与满偏电流 Ig = E/R内 相除：<b>f = R内/(R内+R\u2093)</b>。' +
-'f 是"电流占满偏的几成"，指针偏转正比于 f。<br>' +
-'于是：<b>f = 1（满偏，最右）→ R\u2093 = 0</b>；<b>f → 0（不偏，最左）→ R\u2093 = ∞</b>；' +
-'<b>f = 0.5（正中）→ R\u2093 = R内 = 中值</b>。<br>七点对照（R内 = 1500 Ω）：f = 1 / 0.9 / 0.75 / 0.5 / 0.25 / 0.1 → R\u2093 = 0 / 167 / 500 / 1500 / 4500 / 13.5 kΩ。' +
-'可 f 是等间隔的，R\u2093 却越往左跳得越快 —— 这就是刻度"左挤右疏"的来源。',
+note: 'I = E/(R内+R\u2093) 与 Ig = E/R内 相除得 <b>f = R内/(R内+R\u2093)</b>。于是 <b>f = 1（最右）→ R\u2093 = 0</b>；<b>f → 0（最左）→ R\u2093 = ∞</b>；' +
+'<b>f = 0.5（正中）→ R\u2093 = R内 = 中值</b>。七点对照（R内 = 1500 Ω）：f = 1 / 0.9 / 0.75 / 0.5 / 0.25 / 0.1 → R\u2093 = 0 / 167 / 500 / 1500 / 4500 / 13.5 kΩ。' +
+'f 等间隔而 R\u2093 越往左跳得越快 —— 这就是刻度"左挤右疏"的来源。',
 formula: 'f = R内/(R内 + R\u2093)　f=0.5 → R\u2093 = R内（中值）',
 headline: '一条双曲线，决定了欧姆挡的刻度长相', tag: '0 在右 · ∞ 在左 · 中间最准',
 conclusion: '欧姆挡：0 Ω 在右、∞ 在左，刻度不均匀（左挤右疏）',
@@ -2082,8 +2289,8 @@ init: function (st) { st.mult = 100; st.rx = 1500; st.lawRx = 300; st.rng = { rx
 {
 act: A5, view: 'errBar', title: '为什么必须让指针落中间：误差是两端翘起来的',
 hint: '拖底栏<b>「偏转比 f」</b>，看哪一条误差条被点亮',
-note: '读数误差 δR/R ≈ δf /[ f (1 − f) ]：<b>f = 0.5 时最小（约 1.6%）</b>，指针跑到 f = 0.95 或 f = 0.05 时涨到 <b>8.4%</b>。' +
-'可用范围一般取 <b>0.1 R中 ~ 10 R中</b>（教参 P137）。<br>所以选倍率的标准是：把指针赶到中间三分之一。',
+note: '读数误差 δR/R ≈ δf /[ f (1 − f) ]：<b>f = 0.5 时最小（约 1.6%）</b>，跑到 f = 0.95 或 f = 0.05 时涨到 <b>8.4%</b>。' +
+'可用范围一般取 <b>0.1 R中 ~ 10 R中</b>。所以选倍率的标准是：把指针赶到中间三分之一。',
 formula: 'δR/R ≈ δf /[f(1−f)]　f = 0.5 最小 ≈ 1.6%',
 headline: '误差条：中间 1.6%，两端 8.4%', tag: '可用范围 0.1 R中 ~ 10 R中',
 conclusion: '规则 ⑦：选倍率让指针落在中间区域',
@@ -2093,33 +2300,32 @@ init: function (st) { st.fManual = 0.5; st.rows = []; }
 {
 act: A5, view: 'ohmTable', title: '换倍率：四个倍率的完整参数',
 hint: '点底栏<b>「倍率」</b>×1 / ×10 / ×100 / ×1k，看电池、I满、R内、调零 R₀ 一起变',
-note: '倍率不是"给读数乘一个数"就完了 —— 它换的是<b>表内电阻</b>：×1 挡 R内 = 15 Ω（要借电流挡的分流电阻），' +
-'×10 挡 150 Ω，×100 挡 1500 Ω，×1k 挡 <b>90 kΩ</b>。<br>' +
-'×1k 为什么必须换 9 V：1.5 V 配 0.1 mA 只能给出 15 kΩ 中值，与"×1k"名不副实；换成 9 V 叠层电池（6F22）才有 90 kΩ。' +
-'只讲一句：<b>换倍率就是换 R内</b>。',
+note: '倍率不是"给读数乘一个数"就完了 —— 它换的是<b>表内电阻</b>：×1 挡 R内 = 15 Ω（借电流挡的分流电阻），×10 挡 150 Ω，×100 挡 1500 Ω，×1k 挡 <b>90 kΩ</b>。' +
+'<br>×1k 为什么必须换 9 V：1.5 V 配 0.1 mA 只有 15 kΩ 中值，与"×1k"名不副实；换 9 V 叠层电池才有 90 kΩ。只讲一句：<b>换倍率就是换 R内</b>。',
 formula: 'R中 = R内 = E/I满　×1k 用 9 V',
 headline: '四个倍率：R内 = 15 / 150 / 1500 / 90000 Ω', tag: '×1k 档必须换 9 V 叠层电池',
 conclusion: '换倍率 = 换内阻 = 换满偏电流，三件事一起变',
 allow: ['mult'], dragKey: 'mult',
-init: function (st) { st.mult = 100; st.rows = [rowOhm(100), rowOhm(1000, '×1k 专用尺（中值 90）')]; }
+init: function (st) { st.mult = 100; st.checked = 3; st.markRuleAll = true; st.rows = [rowOhm(100), rowOhm(1000, '×1k 专用尺（中值 90）')]; }
 },
 {
-act: A5, view: 'needs', title: '回扣需求表：③ 打勾，收七张规则卡',
-hint: '这一屏是纯结论：<b>不需要拖动</b>',
-note: '需求表第 ③ 项完成：欧姆挡（自带电源 + 调零 + 换倍率）。<br>' +
-'规则 ⑤ 欧姆挡必须断电、电阻要断开测；规则 ⑥ 每次换挡都要重新短接调零；规则 ⑦ 选倍率让指针落在中间区域。',
-formula: '①②③ 全部完成：3 V 挡 / 0.6 A 挡 / 欧姆挡',
-headline: '需求表 ③ 打勾 · 七张规则卡齐了', tag: '规则 ⑤ 断电 · 规则 ⑥ 调零 · 规则 ⑦ 中间',
-conclusion: '七条规则：并联 · 串联 · 红进黑出 · 正极接黑笔 · 断电 · 调零 · 中间',
-allow: [], dragKey: null,
-init: function (st) { st.checked = 3; st.markRule = true; st.markRuleAll = true; }
+act: A5, view: 'mechZero', title: '为什么要机械调零：指针没指零位，全表都读错',
+hint: '拖底栏<b>「机械调零螺丝」</b>（左右各一段），把指针调回左端零位',
+note: '表头靠<b>游丝复位</b>，运输、受震、久用之后零点会漂。不通电时指针应当指在<b>左端零位</b>（V/A 挡的 0 处，也正是欧姆挡的 ∞ 处）；' +
+'不指就旋<b>指针定位螺丝</b>校正。<br>为什么关键：零点偏了是<b>系统偏差</b>，不是随机误差 —— 每一条读数整体偏移，怎么估读都救不回来。' +
+'所以操作顺序永远是：<b>先机械调零，再选档测量</b>。',
+formula: '机械零位 = 左端（0 / ∞）　零点偏 ±0.06 → ×100 挡 1500 Ω 读成 1179 / 1909 Ω',
+headline: '机械调零：为什么它是第一步', tag: '零点偏 = 系统偏差（1500 Ω 读成 ≈1180 或 ≈1910 Ω）',
+conclusion: '第一步：不通电时先把指针调到左端零位（机械调零）',
+allow: ['screw'], dragKey: 'screw',
+init: function (st) { st.screw = 0.6; st.rows = []; }
 },
 
 {
 act: A6, view: 'compose', title: '从需求到方框：要测什么，就要什么样的电路',
 hint: '点底栏<b>「需求」</b>，看右边对应的方框被点亮',
-note: '测 3 V 电压 → 分压（串） → 方框 [G + R串]；测 0.6 A 电流 → 分流（并） → [G ∥ R并]；' +
-'测电阻 → 自带电源 → [G + E + R₀]。<br>这一步只做<b>一句话的翻译</b>：需求决定连接方式 ---- 图还没画，方框先出来。',
+note: '测 3 V 电压 → 分压（串） → 方框 [G + R串]；测 0.6 A 电流 → 分流（并） → [G ∥ R并]；测电阻 → 自带电源 → [G + E + R₀]。' +
+'这一步只做<b>一句话的翻译</b>：需求决定连接方式。',
 formula: '需求 → 连接方式 → 方框（串 / 并 / 串电池）',
 headline: '从需求到方框：先想"要什么电路"', tag: '分压 / 分流 / 自带电源',
 conclusion: '需求 → 方框：三种需求对应三种连接方式',
@@ -2130,7 +2336,7 @@ init: function (st) { st.need = 1; st.showBoxes = true; }
 act: A6, view: 'spec', title: '从方框到电路图：画法规范',
 hint: '点底栏<b>「比哪张」</b>在规范图 / 错误图之间切，先自己挑错误图的毛病',
 note: '规范五条：横平竖直、转角 90°；节点画实心圆点；抽头标字母 A / B / C；电流箭头标一次；元件符号规范。' +
-'<br>错误图至少犯两条 —— 先自己挑，再画自己的图。规范图所有线段的角度只有 <b>0° 和 90°</b>（这是可断言的几何事实）。',
+'错误图至少犯两条 —— 先自己挑，再画自己的图。规范图所有线段的角度只有 <b>0° 和 90°</b>。',
 formula: '规范图：线段角度 ∈ {0°, 90°} · 含 A/B/C 标号 · 节点画实心圆',
 headline: '作图规范：横平竖直、节点、标字母、标方向', tag: '线段角度只有 0° 与 90°',
 conclusion: '画图规范五条 —— 图是给别人看的，也是给自己接线用的',
@@ -2141,7 +2347,7 @@ init: function (st) { st.figMode = 'bad'; st.rows = []; }
 act: A6, view: 'threeFigs', title: '三张图并列：电压挡 / 电流挡 / 欧姆挡',
 hint: '点底栏<b>「哪张图」</b>放大一张，右栏给对应公式',
 note: '三张图用同一套元件编号：A 是公共端，B / C 是抽头。电压挡串联分压、电流挡并联分流、欧姆挡自带电源。' +
-'<br>看图的顺序是：<b>先找公共端 A，再找抽头，最后看表头接在哪两点之间</b>。',
+'<br>看图的顺序：<b>先找公共端 A，再找抽头，最后看表头接在哪两点之间</b>。',
 formula: '三张图 = 同一只表头 + 三套外围（串 / 并 / 串电池）',
 headline: '三张图并列：同一只表头，三套外围', tag: '元件编号统一：A 公共端 · B/C 抽头',
 conclusion: '图与公式一一对应：串联分压 / 并联分流 / 自带电源',
@@ -2151,10 +2357,9 @@ init: function (st) { st.fig = 'V'; st.rows = []; }
 {
 act: A6, view: 'wire', title: '图 ↔ 实物：一一对应，接线才接得对',
 hint: '点底栏<b>「悬停哪条线」「接哪个抽头」「红笔接」</b>，再点<b>「检查接线」</b>看提示',
-note: '左边电路图的每一条线，在右边实物里都有一条对应的接线（右栏列出映射表）。' +
-'悬停图上一条线，实物对应线高亮。<br>接错时"检查"会给<b>具体</b>提示：红笔接反 → "红笔要接公共端 A"；抽头接错档 → "你接的是 3 V 抽头，但选的是 10 V 档"；' +
-'漏接 A → "A 端没有连线，回路没闭合"；跨接错位 → "R2 被短路了"；一柱两线 → "一个节点最多两根线"。' +
-'<br>先让学生接错一次，再让他自己找错。',
+note: '左边电路图的每一条线，在右边实物里都有一条对应接线（右栏列出映射表）。接错时"检查"会给<b>具体</b>提示：' +
+'红笔接反 → "红笔要接公共端 A"；抽头接错档 → "你接的是 3 V 抽头，但选的是 10 V 挡"；漏接 A → "A 端没有连线，回路没闭合"；' +
+'跨接错位 → "R2 被短路了"；一柱两线 → "一个节点最多两根线"。',
 formula: 'wireMap(kind)：每条图上的线段 ↔ 实物上的一条连线',
 headline: '图 ↔ 物：一一对应（悬停联动 + 接线检查）', tag: '5 种错各给一句具体提示',
 conclusion: '图与实物一一对应 —— 会看图就会接线',
@@ -2162,11 +2367,24 @@ allow: ['fig', 'hoverWire', 'tapBC', 'ckRed', 'check'], dragKey: null,
 init: function (st) { st.fig = 'V'; st.hoverWire = -1; st.tapBC = 'B'; st.ckRed = 'A'; st.checkResult = null; }
 },
 {
+act: A6, view: 'schematic', title: '整只表的内部原理图：开关转到哪一档，只有哪一条线路在工作',
+hint: '点底栏<b>「选择开关」</b>①②③④⑤⑥ 与 OFF，看哪条支路变亮、电流只走那一条',
+note: '把前面的设计拼起来就是这一张图：左边是<b>表头网络</b>（表头 G + 两个分流电阻），右边是<b>六条支路</b>，中间一个旋转选择开关；' +
+'上端接 <b>A（红笔）</b>，下端回到 <b>B（黑笔）</b>。<br>注意开关的作用：<b>任何时刻只有一条支路导通</b> —— ' +
+'选① ② 时表头并联分流电阻量电流；选③ ④ 时串入电池与调零电阻量电阻；选⑤ ⑥ 时串入分压电阻量电压；OFF 时全表断开。' +
+'被选中的支路变亮、其余变灰，电流粒子只沿导通的那条回路流动。',
+formula: '一个开关 + 六条支路：①10 mA ②100 mA ③Ω×100 ④Ω×1k ⑤3 V ⑥10 V · OFF',
+headline: '内部原理图：旋转开关换档 → 只有一条线路起作用', tag: '①②分流 · ③④电池 · ⑤⑥分压 · OFF 断开',
+conclusion: '同一只表头，靠开关换接到不同的附属电路 —— 这就是多用电表的内部',
+allow: ['pos'], dragKey: null,
+init: function (st) { st.pos = 5; st.rows = []; }
+},
+{
 act: A6, view: 'compose', title: '一句话交代"怎么合起来"（降低比重，不展开）',
 hint: '这一屏是纯结论：<b>不需要拖动</b>（具体怎么切换、触点怎么排 —— 不展开）',
-note: '三块电路怎么装进一只表？<b>用一个选择开关，把表头接到不同的"外围"上</b>。' +
+note: '三块电路怎么装进一只表？<b>用一个选择开关，把表头接到不同的外围上</b>。' +
 '<br>具体怎么接、触点怎么排，你们不用管 —— 知道"一个开关换一套外围"就够了。（这一块<b>不展开</b>，原理略。）' +
-'<br>学生要得到的是：<b>这张图是怎么来的</b> —— 需求 → 方框 → 图 → 实物，不要求会做工程实现。',
+'<br>学生要得到的是：<b>这张图是怎么来的</b> —— 需求 → 方框 → 图 → 实物。',
 formula: '合成 = 一个选择开关 + 三套外围（分流 / 电池 / 分压）',
 headline: '合成：一个开关换一套外围（不展开）', tag: '需求 → 方框 → 图 → 实物',
 conclusion: '知道"一个开关换一套外围"就够了 —— 原理略',
@@ -2178,7 +2396,7 @@ init: function (st) { st.noExpand = true; st.showBoxes = false; }
 act: A7, view: 'compose', title: '六个位置：① ② 分流 · ③ ④ 电池 · ⑤ ⑥ 分压',
 hint: '点底栏<b>「选择开关」</b>①②③④⑤⑥（还有 OFF），看对应支路高亮',
 note: '① ② 位置 → 电流挡（并联分流，量程不同）；③ ④ 位置 → 欧姆挡（串电池 + 调零电阻）；' +
-'⑤ ⑥ 位置 → 电压挡（串联分压，量程不同）；不用时 → OFF 或交流电压最高挡。<br>1 分钟过完，不纠缠。',
+'⑤ ⑥ 位置 → 电压挡（串联分压，量程不同）；不用时 → OFF 或交流电压最高挡。1 分钟过完，不纠缠。',
 formula: '①②分流 · ③④电池 · ⑤⑥分压 · OFF 收尾',
 headline: '六个位置：三个功能区', tag: '一个开关，换一套外围',
 conclusion: '六个位置分三个区：分流 / 电池 / 分压',
@@ -2186,16 +2404,19 @@ allow: ['pos'], dragKey: null,
 init: function (st) { st.pos = 5; st.showPos6 = true; st.rows = []; }
 },
 {
-act: A7, view: 'ops', title: '六步操作单：机械调零 → 选挡 → 欧姆调零 → 测量 → 读数 → 复位',
-hint: '点底栏<b>「第几步」</b>切六步，配合<b>「归零」「量程」「红笔接到」「机械调零螺丝」</b>把每一步做对',
-note: '① 机械调零：未通电时指针指左端零位（欧姆刻度上的 ∞ 处）；② 选挡选量程：量程略大于估计值，小于就<b>打表</b>；' +
-'③ 欧姆调零：两笔短接 → 旋 R₀ → 指针压 0 Ω 线，<b>每次换挡都要重做</b>；④ 测量：电压并联、电流串联、电阻断电单独测（红进黑出）；' +
-'⑤ 读数：均匀挡按三类整齐分度估读，欧姆挡 刻度值 × 倍率；⑥ 复位：旋到 OFF 或交流电压最高挡，拔表笔。',
-formula: '六步：机械调零 → 选挡 → 欧姆调零 → 测量 → 读数 → 复位',
-headline: '六步操作单（1 分钟过完）', tag: '量程由对象定，刻度随量程改；红进黑出，欧姆挡电池正极接黑笔',
+act: A7, view: 'ops', title: '六步使用：机械调零 → 选挡 → 欧姆调零 → 测量 → 读数 → 复位',
+hint: '点底栏<b>「第几步」</b>切六步，配合<b>「归零」「量程」「红笔接到」「机械调零螺丝」「欧姆调零」「指针位置」</b>把每一步做对，最后把开关打到 OFF',
+note: '① <b>机械调零</b>：不通电时指针应指左端零位（欧姆挡的 ∞ 处），不指就旋指针定位螺丝；' +
+'② <b>选挡选量程</b>：先看被测对象，再按"最小的 ≥ 2× 被测值"选挡，量程小于被测值会打表；' +
+'③ <b>欧姆调零</b>：用欧姆挡时，两表笔短接 → 旋欧姆调零 → 指针压 0 Ω 线，<b>每次换挡都要重做</b>；' +
+'④ <b>测量</b>：电压并联、电流串联、电阻断电单独测（红进黑出）；' +
+'⑤ <b>读数</b>：均匀挡按三类整齐分度估读，欧姆挡 刻度值 × 倍率；' +
+'⑥ <b>复位</b>：用完把开关旋到 OFF（或交流电压最高挡），拔下表笔。',
+formula: '六步：机械调零 → 选挡 → 欧姆调零 → 测量 → 读数 → 复位（OFF）',
+headline: '六步操作单：从机械调零开始，到 OFF 结束', tag: '量程由对象定 · 换挡必重调零 · 用完旋 OFF',
 conclusion: '六步走完再收表：机械调零 → 选挡 → 欧姆调零 → 测量 → 读数 → 复位',
 allow: ['ops', 'opsRange', 'hookup', 'screwZero', 'needle', 'screw', 'zero', 'pos'], dragKey: null,
-init: function (st) { st.ops = 'screw'; st.opsRange = 3; st.hookup = 0; st.screwZero = 0; st.zero = 0.72; st.needle = 0.5; st.pos = 5; st.rows = []; }
+init: function (st) { st.ops = 'screw'; st.opsRange = 3; st.hookup = 0; st.screwZero = 0; st.zero = 0.72; st.needle = 0.5; st.screw = 0.6; st.pos = 5; st.rows = []; }
 }
 ];
 
@@ -2216,10 +2437,10 @@ return st;
 }
 
 function panelOf(st) {
-var d = STEPS[st.step] || {}, out = { p1: [], p2: [], total: '', rules: [], note: st.note, formula: st.formula };
+var out = { p1: [], p2: [], total: '', rules: [], note: st.note, formula: st.formula };
 if (st.view === 'dial') {
 out = dialPanel(st);
-out.rules = [];
+out.note = st.note; out.formula = st.formula;
 } else if (st.view === 'bench') {
 out.p1 = [['满偏电流 Ig', '1 mA', 'red'], ['内阻 Rg', '100 Ω', 'red'], ['满偏电压 Ug', '0.1 V', 'red']];
 out.p2 = [['指针偏转比 f', (st.needle || 0).toFixed(3), 'ink'], ['表头电流 I', ((st.needle || 0) * 1).toFixed(3) + ' mA', 'blue'], ['表头电压 U', ((st.needle || 0) * 0.1).toFixed(3) + ' V', 'blue']];
@@ -2240,8 +2461,10 @@ out.total = P.seriesR(st.U).toFixed(0) + ' Ω';
 }
 } else if (st.view === 'taps') {
 var tot = P.tapR([1, 3, 10]), dl = P.tapDelta([1, 3, 10]);
-out.p1 = [['看哪一挡', st.tapKind === 'amp' ? '电流挡' : '电压挡', 'blue'], ['当前抽头', '第 ' + st.tap + ' 档', 'orange']];
-out.p2 = [['总串阻 1/3/10 V', tot.map(function (v) { return Math.round(v); }).join(' / ') + ' Ω', 'ink'], ['相邻差', dl.map(function (v) { return Math.round(v); }).join(' / ') + ' Ω', 'orange'], ['分流 10mA/100mA/0.6A', P.shuntR(0.01).toFixed(3) + ' / ' + P.shuntR(0.1).toFixed(3) + ' / ' + P.shuntR(0.6).toFixed(4) + ' Ω', 'blue']];
+out.p1 = [['看哪一挡', st.tapKind === 'amp' ? '电流挡' : '电压挡', 'blue'], ['当前档位', '第 ' + st.tap + ' 档', 'orange']];
+out.p2 = [['电流四档分流电阻', P.shuntR(0.01).toFixed(4) + ' / ' + P.shuntR(0.1).toFixed(4) + ' / ' + P.shuntR(0.6).toFixed(4) + ' / ' + P.shuntR(3).toFixed(4) + ' Ω', 'blue'],
+['电压四档串阻', '900 / 2900 / 9900 / 14900 Ω', 'orange'],
+['相邻差', dl.map(function (v) { return Math.round(v); }).join(' / ') + ' Ω', 'ink']];
 out.total = st.tapKind === 'amp' ? P.shuntR([0.01, 0.1, 0.6][st.tap - 1]).toFixed(4) + ' Ω' : Math.round(dl[st.tap - 1]) + ' Ω';
 } else if (st.view === 'probe') {
 var pol = P.polarity(st.pMode);
@@ -2260,9 +2483,23 @@ out.total = hs.reverse ? '反向打到底' : (st.probe >= 2 ? '正向偏转' : '
 } else if (st.view === 'ohmCircuit') {
 var m = st.mult, Rin = P.ohmRint(m);
 var Ilive = st.addBattery ? P.ohmE(m) / (Rin + Math.max(0, st.rx)) : 0;
-out.p1 = [['倍率', '×' + m, 'red'], ['表内电阻 R内', fmtOhm(Rin), 'blue'], ['调零 R₀', fmtOhm(P.ohmR0(m)), 'orange']];
+out.p1 = [['倍率', '×' + m, 'red'], ['表内电阻 R内', fmtOhm(Rin), 'blue'], ['欧姆调零 R₀', fmtOhm(P.ohmR0(m)), 'orange']];
 out.p2 = [['被测电阻 R\u2093', fmtOhm(st.rx), 'ink'], ['回路电流 I', (Ilive * 1000).toFixed(3) + ' mA', 'blue'], ['短路时 R内 = E/Ig', fmtOhm(P.ohmE(m) / P.ohmIfs(m)), 'green']];
 out.total = st.addBattery ? (Ilive * 1000).toFixed(3) + ' mA' : '0（无电源）';
+} else if (st.view === 'mechZero') {
+var scr = st.screw == null ? 0 : st.screw, off = P.mechOffset(scr);
+out.p1 = [['螺丝位置', (scr > 0 ? '+' : '') + (scr * 100).toFixed(0) + '%', 'orange'], ['零点偏移', off.toFixed(3) + ' （格比例）', Math.abs(off) < 0.02 ? 'green' : 'red']];
+out.p2 = [['真值（×100 挡）', '1500 Ω', 'ink'], ['若指针偏右读数', Math.round(P.mechRead(1500, 100, 1, 1)) + ' Ω（偏小）', 'red'], ['若指针偏左读数', Math.round(P.mechRead(1500, 100, 1, -1)) + ' Ω（偏大）', 'red']];
+out.total = Math.abs(off) < 0.02 ? '已归零' : '未归零（读数整体偏 ' + Math.abs(off / 0.5 * 100).toFixed(0) + '%）';
+} else if (st.view === 'schematic') {
+var br = P.branchOf(st.pos), k = br.kind;
+out.p1 = [['开关位置', st.pos === 0 ? 'OFF' : '第 ' + st.pos + ' 位', 'blue'], ['档位', br.label, 'orange']];
+out.p2 = k === 'A' ? [['量程', (br.range * 1000).toFixed(0) + ' mA', 'blue'], ['分流电阻', P.shuntR(br.range).toFixed(4) + ' Ω', 'orange'], ['接法', '串进被测回路', 'ink']]
+: k === 'V' ? [['量程', br.U + ' V', 'blue'], ['串阻 R串', br.R串 + ' Ω', 'orange'], ['接法', '并联在被测两点', 'ink']]
+: k === 'ohm' ? [['电池', br.E + ' V', 'blue'], ['调零 R₀', fmtOhm(br.R0), 'orange'], ['表内阻 R内', fmtOhm(br.Rint), 'ink']]
+: [['状态', '开关断开', 'red'], ['电流', 'I = 0', 'ink']];
+out.total = st.pos === 0 ? 'OFF' : br.short;
+out.path = br.path;
 } else if (st.view === 'law') {
 var m2 = st.mult, R2 = P.ohmRint(m2), rx = st.lawRx == null ? 300 : st.lawRx;
 var f = R2 / (R2 + Math.max(1e-6, rx));
@@ -2330,10 +2567,11 @@ out.total = '对答案';
 var rulesAll = P.RULES;
 if (st.markRuleAll) { out.rules = rulesAll.map(function (r) { return r.text; }); }
 else {
-var pick = { 4: ['r3', 'r4'], 5: ['r5', 'r6', 'r7'] };
-var actIdx = ['0', '1', '2', '3', '4', '5', '6', '7'].indexOf(String(st.act).match(/第 (\d) 幕/)[1]);
+var mAct = String(st.act).match(/第 (\d) 幕/);
+var actIdx = mAct ? mAct[1] : '0';
+var pick = { '4': ['r3', 'r4'], '5': ['r5', 'r6', 'r7'] };
 if (pick[actIdx]) { out.rules = rulesAll.filter(function (r) { return pick[actIdx].indexOf(r.id) >= 0; }).map(function (r) { return r.text; }); }
-else if (actIdx === 2) { out.rules = ['规则 ① 电压表并联接在被测两点之间', '规则 ② 量程选略大于被测值、留约一半余量']; }
+else if (actIdx === '2') { out.rules = ['规则 ① 电压表并联接在被测两点之间', '规则 ② 量程选略大于被测值、留约一半余量']; }
 else { out.rules = []; }
 }
 return out;
@@ -2342,6 +2580,7 @@ return out;
 return {
 STEPS: STEPS, apply: apply, baseState: baseState, REG: REG, ORDER: ORDER,
 panelOf: panelOf, checkFill: checkFill, FILL: FILL, fmtOhm: fmtOhm,
+rowsTextbook: rowsTextbook,
 ACTS: [A0, A1, A2, A3, A4, A5, A6, A7]
 };
 })();
@@ -2737,7 +2976,7 @@ function chk(name, cond) { cases++; if (!cond) { errs.push(name); } }
 var i, j, k, d;
 
 /* 1. 结构 */
-chk('八幕 30 步', S.STEPS.length === 30 && S.ACTS.length === 8);
+chk('八幕 31 步', S.STEPS.length === 31 && S.ACTS.length === 8);
 var acts = {};
 for (i = 0; i < S.STEPS.length; i++) { acts[String(S.STEPS[i].act).split(' · ')[0]] = 1; }
 chk('幕标签共 8 个', Object.keys(acts).length === 8);
@@ -2788,17 +3027,51 @@ chk('正序/逆序面板完全一致（无状态残留）', true);
 
 /* 5. 结论屏必须 allow 为空（防误加拖拽） */
 chk('第 3 步（需求表结论屏）allow 为空', (S.STEPS[2].allow || []).length === 0);
-chk('第 28 步（合成降比重）allow 为空', (S.STEPS[27].allow || []).length === 0);
-chk('第 28 步文本含"不展开"', /不展开/.test(String(S.STEPS[27].note) + String(S.STEPS[27].headline) + String(S.STEPS[27].conclusion)));
-chk('第 23 步（欧姆回扣）allow 为空', (S.STEPS[22].allow || []).length === 0);
+chk('第 29 步（合成降比重）allow 为空', (S.STEPS[28].allow || []).length === 0);
+chk('第 29 步文本含"不展开"', /不展开/.test(String(S.STEPS[28].note) + String(S.STEPS[28].headline) + String(S.STEPS[28].conclusion)));
+
+/* 5b. 本次新增的两大功能：大表盘 + 原理图随档位实时对应 */
+var iSch = -1, iMech = -1, iMulti = -1, iOps = -1, iDialBook = -1;
+for (i = 0; i < S.STEPS.length; i++) {
+d = S.STEPS[i];
+if (d.view === 'schematic') { iSch = i; }
+if (d.view === 'mechZero') { iMech = i; }
+if (String(d.title).indexOf('多个档位') >= 0) { iMulti = i; }
+if (d.view === 'ops') { iOps = i; }
+if (d.view === 'dial' && String(d.title).indexOf('课本 11.5 的表盘') >= 0) { iDialBook = i; }
+}
+chk('有「完整内部原理图」步且能转开关', iSch >= 0 && (S.STEPS[iSch].allow || []).indexOf('pos') >= 0);
+chk('原理图：0~6 每个位置都能算出唯一支路', (function () {
+for (var q = 0; q <= 6; q++) { var b = P.branchOf(q); if (!b) { return false; } if (q === 0) { if (b.kind !== 'off') { return false; } } else if (b.pos !== q || !b.kind) { return false; } }
+return true;
+})());
+chk('原理图：每个档位都能给出电流路径（导通支路唯一）', (function () {
+for (var q = 1; q <= 6; q++) { var b = P.branchOf(q); if (!b.path || String(b.path).length < 10) { return false; } }
+return true;
+})());
+chk('原理图高亮规则与档位一致（isActive 抽查）', P.isActive(2, 'Rs1') === true && P.isActive(1, 'Rs2') === true && P.isActive(5, 'V串') === true && P.isActive(3, 'E1') === true && P.isActive(4, 'E2') === true && P.isActive(0, 'G') === false);
+chk('有「机械调零」步且可旋螺丝', iMech >= 0 && (S.STEPS[iMech].allow || []).indexOf('screw') >= 0 && S.STEPS[iMech].dragKey === 'screw');
+chk('机械调零：零点偏 → 读数整体偏（系统偏差 >10%）', (1 - P.mechRead(1500, 100, 1, 1) / 1500) > 0.1 && (P.mechRead(1500, 100, 1, -1) / 1500 - 1) > 0.1);
+chk('有「多档设计」步且在量程幕里', iMulti >= 0 && (S.STEPS[iMulti].allow || []).indexOf('tapKind') >= 0 && (S.STEPS[iMulti].allow || []).indexOf('tap') >= 0);
+chk('多档：电流四档/电压四档单调且不等', (function () {
+var mA = [0.01, 0.1, 0.6, 3], mV = [1, 3, 10, 15], q;
+for (q = 1; q < mA.length; q++) { if (!(P.shuntR(mA[q]) < P.shuntR(mA[q - 1]))) { return false; } }
+for (q = 1; q < mV.length; q++) { if (!(P.seriesR(mV[q]) > P.seriesR(mV[q - 1]))) { return false; } }
+return true;
+})());
+chk('课本表盘 = Ω 尺 + 三排均匀尺（250/50/10）', (function () {
+var rs = S.rowsTextbook();
+return rs.length === 4 && rs[0].type === 'ohm' && rs[1].max === 250 && rs[2].max === 50 && rs[3].max === 10;
+})());
+chk('使用流程步：六步顺序固定且末步是复位', iOps >= 0 && (S.STEPS[iOps].allow || []).indexOf('pos') >= 0 && P.SIX_STEPS.length === 6 && P.SIX_STEPS[5].id === 'reset' && /复位/.test(P.SIX_STEPS[5].title));
 
 /* 6. 勾选状态与已完成量程一致（按步骤应用后的实际状态判） */
 S.apply(st, 9);
 chk('2.5 步需求表勾 2 行', st.checked === 2 && st.markRule === true);
-S.apply(st, 22);
-chk('5.6 步需求表勾 3 行', st.checked === 3 && st.markRuleAll === true);
-S.apply(st, 27);
-chk('6.5 步带"不展开"标记', st.noExpand === true);
+S.apply(st, 21);
+chk('5.5 步需求表勾 3 行', st.checked === 3 && st.markRuleAll === true);
+S.apply(st, 28);
+chk('6.6 步带"不展开"标记', st.noExpand === true);
 
 /* 7. 分度白名单：DIV_TABLE 里每个分度都属教材三类 */
 var dts = Object.keys(P.DIV_TABLE);
@@ -2824,9 +3097,9 @@ return true;
 })());
 
 /* 10. 规则卡：第 4 幕、第 5 幕各步都带规则 */
-S.apply(st, 22);
+S.apply(st, 21);
 derive();
-chk('第 5 幕回扣步带 7 张规则卡', (st.panel.rules || []).length === 7);
+chk('第 5 幕收束步带 7 张规则卡', (st.panel.rules || []).length === 7);
 S.apply(st, 15);
 derive();
 chk('第 4 幕（欧姆挡表笔）带 2 张规则卡', (st.panel.rules || []).length === 2);
